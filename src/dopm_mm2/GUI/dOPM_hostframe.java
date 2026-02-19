@@ -24,6 +24,10 @@ import org.micromanager.propertymap.MutablePropertyMapView;
 /**
  *
  * @author lnr19
+ * REVISION (Layer 8.5):
+ * - UI Defaults: XY Stage Scan tab and Y Stage radio button selected on startup.
+ * - Safety Defaults: Fraction of Max set to 0.90.
+ * - Visual Feedback: Scan speed fields transform into Indicators (gray/read-only) when Max is ticked.
  */
 public class dOPM_hostframe extends javax.swing.JFrame {
 
@@ -107,6 +111,24 @@ public class dOPM_hostframe extends javax.swing.JFrame {
         
         initComponents();
         
+        // REVISION Layer 8.5: Apply defaults for XY Stage scanning and safe speeds
+        xyMaxSpeedCheckBox.setSelected(true);
+        mirrorMaxSpeedCheckBox.setSelected(true);
+        fracOfMaxXyField.setText("0.90");
+        fracOfMaxMirrorField.setText("0.90");
+        
+        deviceSettings.setUseMaxScanSpeedForXyStage(true);
+        deviceSettings.setUseMaxScanSpeedForMirror(true);
+        deviceSettings.setScanSpeedSafetyFactorXy(0.90);
+        deviceSettings.setScanSpeedSafetyFactorMirror(0.90);
+
+        // DEFAULT UI VIEW: Select XY Stage Scan tab (index 1) and Y Stage radio button
+        jTabbedPane1.setSelectedIndex(1); 
+        yScanRadioButton.setSelected(true);
+        deviceSettings.setScanType(DeviceSettingsManager.YSTAGE_SCAN);
+        
+        updateScanSpeedIndicators(); // Initialize visual states (Indicators vs Inputs)
+        
         try {
             ImageIcon img = new ImageIcon(".\\dopm_icon.png");
             frame_.setIconImage(img.getImage());
@@ -118,6 +140,33 @@ public class dOPM_hostframe extends javax.swing.JFrame {
         
         dOPM_hostframeLogger.info("Initialised dOPM_MM2 hostframe");
 
+    }
+
+    /** REVISION Layer 8: Updates UI text boxes to show calculated values 
+     * and toggles their "Indicator" (read-only) status.
+     */
+    private void updateScanSpeedIndicators() {
+        deviceSettings.updateCurrentScanSpeedsDuringAcq();
+
+        // XY Stage Visual Logic
+        if (xyMaxSpeedCheckBox.isSelected()) {
+            xyScanSpeedField.setText(String.format("%.4f", deviceSettings.getXyStageCurrentScanSpeed()));
+            xyScanSpeedField.setEditable(false);
+            xyScanSpeedField.setBackground(new java.awt.Color(240, 240, 240));
+        } else {
+            xyScanSpeedField.setEditable(true);
+            xyScanSpeedField.setBackground(java.awt.Color.WHITE);
+        }
+
+        // Mirror Visual Logic
+        if (mirrorMaxSpeedCheckBox.isSelected()) {
+            mirrorScanSpeedField.setText(String.format("%.4f", deviceSettings.getMirrorStageCurrentScanSpeed()));
+            mirrorScanSpeedField.setEditable(false);
+            mirrorScanSpeedField.setBackground(new java.awt.Color(240, 240, 240));
+        } else {
+            mirrorScanSpeedField.setEditable(true);
+            mirrorScanSpeedField.setBackground(java.awt.Color.WHITE);
+        }
     }
     
     private int makeDirsAndLog(){
@@ -505,7 +554,7 @@ public class dOPM_hostframe extends javax.swing.JFrame {
                     .addComponent(xyScanIntervalField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
                     .addComponent(xyScanLengthField, javax.swing.GroupLayout.PREFERRED_SIZE, 100, javax.swing.GroupLayout.PREFERRED_SIZE)
                     .addGroup(xyStageScanSettingsPanelLayout.createSequentialGroup()
-                        .addComponent(xyScanSpeedField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                        .addComponent(xyScanSpeedField, javax.swing.GroupLayout.PREFERRED_SIZE, 100, javax.swing.GroupLayout.PREFERRED_SIZE)
                         .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
                         .addComponent(xyMaxSpeedCheckBox)
                         .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
@@ -730,7 +779,7 @@ public class dOPM_hostframe extends javax.swing.JFrame {
     
     private void triggerModeComboBoxActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_triggerModeComboBoxActionPerformed
         deviceSettings.setTriggerMode(triggerModeComboBox.getSelectedIndex());
-        // update the max triggered scan speed since it is affected by triggerMode
+        updateScanSpeedIndicators();
     }//GEN-LAST:event_triggerModeComboBoxActionPerformed
 
     private void browseDirectoryFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_browseDirectoryFieldActionPerformed
@@ -760,18 +809,6 @@ public class dOPM_hostframe extends javax.swing.JFrame {
         volumeAcqThread.start();
         setRunnableIsRunning(true);
         
-        // Does this do anything now that we pass runnable to acquisitions()?
-        /*
-        Thread mirrorScanRunnableThread = new Thread(mirrorScanRunnable);
-            mirrorScanRunnableThread.setUncaughtExceptionHandler(
-                    new Thread.UncaughtExceptionHandler() {
-            @Override
-            public void uncaughtException(Thread t, Throwable e) {
-                // Handle the uncaught exception here (e.g., log it, alert users, etc.)
-                dOPM_hostframeLogger.severe("Exception in thread " + t.getName() 
-                        + ": " + e.getMessage());
-            }
-        });*/
     }//GEN-LAST:event_startButtonActionPerformed
 
     private void saveToDiskCheckBoxActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_saveToDiskCheckBoxActionPerformed
@@ -788,12 +825,7 @@ public class dOPM_hostframe extends javax.swing.JFrame {
     }//GEN-LAST:event_saveDirectoryFieldActionPerformed
 
     private void snapTestButtonActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_snapTestButtonActionPerformed
-        // Runnable testRunnable = new PITriggerTest(core_, mm_);
-        // Runnable testRunnable = new MDARunnable(this, "null");
-        // mm_.getAcquisitionManager().attachRunnable(-1, -1, -1, -1, testRunnable);
-        // mm_.getAcquisitionManager().runAcquisitionNonblocking();
-        // Thread testThread = new Thread(testRunnable);
-        // testThread.start();
+        // Placeholder for original test functionality
     }//GEN-LAST:event_snapTestButtonActionPerformed
 
     private void openDeviceConfigMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_openDeviceConfigMenuItemActionPerformed
@@ -805,6 +837,7 @@ public class dOPM_hostframe extends javax.swing.JFrame {
             String configFile = fc.getSelectedFile().getAbsolutePath();
             setConfigFilePath(configFile);
             deviceSettings.loadSystemSettings(configFile);
+            updateScanSpeedIndicators();
         }   
     }//GEN-LAST:event_openDeviceConfigMenuItemActionPerformed
 
@@ -858,83 +891,57 @@ public class dOPM_hostframe extends javax.swing.JFrame {
     }//GEN-LAST:event_clearLogsMenuItemActionPerformed
 
     private void mirrorMaxSpeedCheckBoxActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_mirrorMaxSpeedCheckBoxActionPerformed
-        if (mirrorMaxSpeedCheckBox.isSelected()){
-            deviceSettings.setUseMaxScanSpeedForMirror(true);
-            mirrorScanSpeedField.setEnabled(false);
-        } else {
-            deviceSettings.setUseMaxScanSpeedForMirror(false);
-            mirrorScanSpeedField.setEnabled(true);
-        }
+        boolean isSelected = mirrorMaxSpeedCheckBox.isSelected();
+        deviceSettings.setUseMaxScanSpeedForMirror(isSelected);
+        updateScanSpeedIndicators();
     }//GEN-LAST:event_mirrorMaxSpeedCheckBoxActionPerformed
 
     private void mirrorScanIntervalFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_mirrorScanIntervalFieldActionPerformed
-        // TODO GET THIS COORD TRANSFORM CORRECT
-        // value is supplied in normal coordinates
-        double scanInterval =
-                Double.parseDouble(mirrorScanIntervalField.getText());
-        // convert to actual lateral scan coordinates
-        // double scanIntervalLateral 
-        //= deviceSettings.lateralScanToLabZ(scanIntervalMirrorZprime);
-        dOPM_hostframeLogger.info("parsing scan length as " + 
-                scanInterval);
-        // dOPM_hostframeLogger.info("set lateral mirror scan trigger dist to " + 
-        //         scanIntervalLateral);
+        double scanInterval = Double.parseDouble(mirrorScanIntervalField.getText());
+        dOPM_hostframeLogger.info("parsing scan interval as " + scanInterval);
         deviceSettings.setMirrorTriggerDistance(scanInterval);
+        updateScanSpeedIndicators();
     }//GEN-LAST:event_mirrorScanIntervalFieldActionPerformed
 
     private void mirrorScanSpeedFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_mirrorScanSpeedFieldActionPerformed
-        double scanSpeedInput =
-                Double.parseDouble(mirrorScanSpeedField.getText());
-
-        // global scan speed setting
+        double scanSpeedInput = Double.parseDouble(mirrorScanSpeedField.getText());
         deviceSettings.setMirrorStageGlobalScanSpeed(scanSpeedInput);
-        mirrorScanSpeedField.setText(String.format("%.4f",
-            deviceSettings.getMirrorStageGlobalScanSpeed()));
+        mirrorScanSpeedField.setText(String.format("%.4f", deviceSettings.getMirrorStageGlobalScanSpeed()));
     }//GEN-LAST:event_mirrorScanSpeedFieldActionPerformed
 
     private void mirrorScanLengthFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_mirrorScanLengthFieldActionPerformed
-        double scanLength = 
-                Double.parseDouble(mirrorScanLengthField.getText());
-        // convert from z remote scan coordinates (z to mirror lateral)
-        // double scanLengthLateral = deviceSettings.lateralScanToLabZ(scanLengthZprime);
+        double scanLength = Double.parseDouble(mirrorScanLengthField.getText());
         dOPM_hostframeLogger.info("parsing scan length as " + scanLength);
         deviceSettings.setMirrorScanLength(scanLength);
-        // dOPM_hostframeLogger.info("set lateral mirror scan length to " + 
-        //         scanLengthLateral);
     }//GEN-LAST:event_mirrorScanLengthFieldActionPerformed
 
     private void fracOfMaxMirrorFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_fracOfMaxMirrorFieldActionPerformed
-        double mirrorSafetyFactor =
-                Double.parseDouble(fracOfMaxMirrorField.getText());
-        deviceSettings.setScanSpeedSafetyFactorMirror(mirrorSafetyFactor);    }//GEN-LAST:event_fracOfMaxMirrorFieldActionPerformed
+        double mirrorSafetyFactor = Double.parseDouble(fracOfMaxMirrorField.getText());
+        deviceSettings.setScanSpeedSafetyFactorMirror(mirrorSafetyFactor);
+        updateScanSpeedIndicators();
+    }//GEN-LAST:event_fracOfMaxMirrorFieldActionPerformed
 
     private void fracOfMaxXyFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_fracOfMaxXyFieldActionPerformed
-        double xySafetyFactor =
-                Double.parseDouble(fracOfMaxXyField.getText());
+        double xySafetyFactor = Double.parseDouble(fracOfMaxXyField.getText());
         deviceSettings.setScanSpeedSafetyFactorXy(xySafetyFactor);
+        updateScanSpeedIndicators();
     }//GEN-LAST:event_fracOfMaxXyFieldActionPerformed
 
     private void xyMaxSpeedCheckBoxActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_xyMaxSpeedCheckBoxActionPerformed
-        if (xyMaxSpeedCheckBox.isSelected()){
-            deviceSettings.setUseMaxScanSpeedForXyStage(true);
-            xyScanSpeedField.setEnabled(false);
-        } else {
-            deviceSettings.setUseMaxScanSpeedForXyStage(false);
-            xyScanSpeedField.setEnabled(true);
-        }
+        boolean isSelected = xyMaxSpeedCheckBox.isSelected();
+        deviceSettings.setUseMaxScanSpeedForXyStage(isSelected);
+        updateScanSpeedIndicators();
     }//GEN-LAST:event_xyMaxSpeedCheckBoxActionPerformed
 
     private void xyScanIntervalFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_xyScanIntervalFieldActionPerformed
-        deviceSettings.setXyStageTriggerDistance(
-            Double.parseDouble(xyScanIntervalField.getText()));
+        deviceSettings.setXyStageTriggerDistance(Double.parseDouble(xyScanIntervalField.getText()));
+        updateScanSpeedIndicators();
     }//GEN-LAST:event_xyScanIntervalFieldActionPerformed
 
     private void xyScanSpeedFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_xyScanSpeedFieldActionPerformed
         double scanSpeedInput = Double.parseDouble(xyScanSpeedField.getText());
         deviceSettings.setXyStageGlobalScanSpeed(scanSpeedInput);
-
-        xyScanSpeedField.setText(String.format("%.4f",
-            deviceSettings.getXyStageGlobalScanSpeed()));
+        xyScanSpeedField.setText(String.format("%.4f", deviceSettings.getXyStageGlobalScanSpeed()));
     }//GEN-LAST:event_xyScanSpeedFieldActionPerformed
 
     private void xyScanLengthFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_xyScanLengthFieldActionPerformed
@@ -1077,10 +1084,6 @@ public class dOPM_hostframe extends javax.swing.JFrame {
      */
     public static void main(String args[]) {
         /* Set the Nimbus look and feel */
-        //<editor-fold defaultstate="collapsed" desc=" Look and feel setting code (optional) ">
-        /* If Nimbus (introduced in Java SE 6) is not available, stay with the default look and feel.
-         * For details see http://download.oracle.com/javase/tutorial/uiswing/lookandfeel/plaf.html 
-         */
         try {
             for (javax.swing.UIManager.LookAndFeelInfo info : javax.swing.UIManager.getInstalledLookAndFeels()) {
                 if ("Nimbus".equals(info.getName())) {
@@ -1088,17 +1091,9 @@ public class dOPM_hostframe extends javax.swing.JFrame {
                     break;
                 }
             }
-        } catch (ClassNotFoundException ex) {
-            // TODO REPLACE util.logging.level with shorthand
-            dOPM_hostframeLogger.log(java.util.logging.Level.SEVERE, null, ex);
-        } catch (InstantiationException ex) {
-            dOPM_hostframeLogger.log(java.util.logging.Level.SEVERE, null, ex);
-        } catch (IllegalAccessException ex) {
-            dOPM_hostframeLogger.log(java.util.logging.Level.SEVERE, null, ex);
-        } catch (javax.swing.UnsupportedLookAndFeelException ex) {
+        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | javax.swing.UnsupportedLookAndFeelException ex) {
             dOPM_hostframeLogger.log(java.util.logging.Level.SEVERE, null, ex);
         }
-        //</editor-fold>
 
         /* Create and display the form */
         java.awt.EventQueue.invokeLater(new Runnable() {
