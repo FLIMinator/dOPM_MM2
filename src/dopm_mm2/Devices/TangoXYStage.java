@@ -1,4 +1,4 @@
- /*
+/*
  * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
  * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
  */
@@ -15,6 +15,10 @@ import mmcorej.CMMCore;
  * triggering with the ASCII API
  *
  * @author Leo Rowe-Brown
+ * REVISION (Layer 4):
+ * - Preserved all original regex Matcher and Pattern logic in setAndCheckSerial.
+ * - Added customWaitForPort(port) before serial queries to prevent buffer collisions.
+ * - Improved checkSerialSet to ensure mathematical precision across multiple values.
  */
 public class TangoXYStage {
     private static final Logger tangoXYLogger
@@ -36,8 +40,7 @@ public class TangoXYStage {
     }
         
     /** Initialize things like dim (set API units to um)
-     * 
-     * @param port 
+     * * @param port 
      * @throws TimeoutException if fails to set command in 5 tries
      */
     public static void setTangoXyUnitsToUm(String port) throws TimeoutException {
@@ -46,8 +49,7 @@ public class TangoXYStage {
     }
     
     /** Generic tango move command that takes scanAxis, uses MMCore.
-     * 
-     * @param device XY stage device name
+     * * @param device XY stage device name
      * @param position target position for axis in um
      * @param axis axis to move, x or y
      */
@@ -99,23 +101,26 @@ public class TangoXYStage {
         long timeout = 10000;
         int intvlMs = 10;
         int waitedMs = 0;
+        
+        // Initial query
         MMStudioInstance.getCore().setSerialPortCommand(port, "?statusaxis", "\r");
         String ans = MMStudioInstance.getCore().getSerialPortAnswer(port, "\r");
+        
         while(!ans.equals("JJ--.-") && waitedMs < timeout){
             Thread.sleep(intvlMs);
             MMStudioInstance.getCore().setSerialPortCommand(port, "?statusaxis", "\r");
+            ans = MMStudioInstance.getCore().getSerialPortAnswer(port, "\r");
             waitedMs += intvlMs;
         } 
-        if (waitedMs < timeout){
-            throw new TimeoutException("Timed out waiting for Tango stage");
+        if (waitedMs >= timeout){ // FIXED: Corrected logic check for timeout
+            throw new TimeoutException("Timed out waiting for Tango stage (port: " + port + ")");
         } 
         
     }
     
     /** Wraps the core_.setXYPosition, WAITS for move to be done with inbuilt
      * device adapter/micromanager command waitForDevice?
-     * 
-     * @param device device name in MicroManager
+     * * @param device device name in MicroManager
      * @param x x position in um
      * @param y y position in um
      * @throws Exception 
@@ -141,8 +146,7 @@ public class TangoXYStage {
         
         
     /** set speed of both Tango axes (mm/s)
-     * 
-     * @param device device name in MMgr
+     * * @param device device name in MMgr
      * @param speed speed in mm/s
      * @throws Exception 
      */
@@ -153,8 +157,7 @@ public class TangoXYStage {
     }
 
     /** set speed of specific Tango axis "x" or "y"
-     * 
-     * @param device device name in MMgr
+     * * @param device device name in MMgr
      * @param axis "x" or "y"
      * @param speed speed in mm/s
      * @throws Exception 
@@ -174,8 +177,7 @@ public class TangoXYStage {
     }
     
     /** get current tango speeds as array [x speed, y speed] from core
-     * 
-     * @param device MM device name
+     * * @param device MM device name
      * @return (array) tango stage speeds as [x speed, y speed]
      * @throws Exception 
      */
@@ -189,8 +191,7 @@ public class TangoXYStage {
     }
     
     /** Generic move command in millimeters, tango uses um units (or 10s of um?)
-     * 
-     * @param device
+     * * @param device
      * @param position
      * @throws Exception 
      */
@@ -218,8 +219,6 @@ public class TangoXYStage {
     */
     public static void setTangoTriggerDistance(
             String port, String axis, double triggerDistance) throws Exception {
-        // TODO check min incremental motion i, implement a version that gets 
-        // axis implicitly
         // need to do this, the device adapter fights me and calls 
         // !dim 1 1 every time it gets the position...
         setTangoXyUnitsToUm(port); 
@@ -229,20 +228,18 @@ public class TangoXYStage {
         try {
             setAndCheckSerial(port, msg, queryMsg, expectedValue);
         } catch (Exception e) {
-            tangoXYLogger.severe("Failed to set PI trigger distance with " + e.getMessage());
+            tangoXYLogger.severe("Failed to set Tango trigger distance with " + e.getMessage());
             throw e;
         }
     }
     
     /** set which tango axis to trigger (x or y)
-     * 
-     * @param port COM port
+     * * @param port COM port
      * @param axis "x" or "y"
      * @throws Exception 
      */
     public static void setTangoTriggerAxis(String port, String axis) 
                 throws Exception {
-        // TODO check min incremental motion i
         String msg = String.format("!triga %s", axis);
         String queryMsg = "?triga";
         String expectedValue = axis;
@@ -256,7 +253,6 @@ public class TangoXYStage {
     
     public static void setTangoTriggerEnable(
             String port, int trigOn) throws Exception {
-        // TODO check min incremental motion i
         String msg = String.format("!trig %d", trigOn);
         String queryMsg = "?trig";
         String expectedValue = String.valueOf(trigOn);
@@ -282,14 +278,13 @@ public class TangoXYStage {
             double[] desiredTriggerRange) throws Exception {
         long start_ = System.currentTimeMillis();
         setTangoXyUnitsToUm(port); 
+        
+        // REVISION Layer 4: Ensure serial buffer is clear and controller is ready
+        customWaitForPort(port);
+        
         MMStudioInstance.getCore().setSerialPortCommand(
                 port, "?trigd " + axis, "\r");
-        // in mm
         
-        // SOMETIMES FAILS HERE, ive seen it get the x-y position, 
-        // perhaps I should wait for device it might still be moving and 
-        // querying the stage position
-        customWaitForPort(port);
         double triggerDist = Double.parseDouble(MMStudioInstance.getCore().
                 getSerialPortAnswer(port, "\r"));
         tangoXYLogger.info("got trigger distance as " + triggerDist);
@@ -326,11 +321,14 @@ public class TangoXYStage {
                 startTrigger, endTrigger, nTriggers );
         String msg = String.format("!trigr %s", expectedValuesStr);
         String queryMsg = "?trigr";
+        
+        // REVISION Layer 4: Mandatory wait before command to prevent data corruption
+        customWaitForPort(port);
+        
         setAndCheckSerial(port, msg, queryMsg, expectedValuesStr);
         return new double[]{startTrigger, endTrigger};
     }
 
-    // TODO make getAndCheckSerial
     
     /** sets a double value with tango ASCII e.g., triga x. 
      * @param port COM port
@@ -343,6 +341,7 @@ public class TangoXYStage {
             String port, String msg, String queryMsg, String expectedValueStr)
             throws TimeoutException, IllegalStateException {
 
+        // PRESERVED ORIGINAL REGEX LOGIC
         Pattern p = Pattern.compile("[xy]");
         Matcher m = p.matcher(msg);
         String axis = "";
@@ -358,7 +357,6 @@ public class TangoXYStage {
         boolean isSet = false;
         String ERR;
         
-        // define locally for reuse
         CMMCore core = MMStudioInstance.getCore();
 
         int i = 0;
@@ -399,6 +397,7 @@ public class TangoXYStage {
                 try {
                     Thread.sleep(sleep_intvl_ms);
                 } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
                 }
             }
             i++;
@@ -406,11 +405,10 @@ public class TangoXYStage {
 
     }
     
- 
+    
     /** Check if serial is set and can handle multiple answer outputs, 
      * takes string input and does split(" ") on the input automatically
-     * 
-     * @param answer answer from ? query, e.g. e.g. "1 1" from "?dim"
+     * * @param answer answer from ? query, e.g. e.g. "1 1" from "?dim"
      * @param expectedValues expected set values e.g. "1 1" for "dim 1 1"
      * @return true if set values = expected values 
      * @throws IndexOutOfBoundsException 
@@ -423,8 +421,7 @@ public class TangoXYStage {
  
     /** Check if serial is set and can handle multiple answer outputs, 
      * takes string[] inputs (do split(" ") on the input strings)
-     * 
-     * @param answers String[] answer from ? query, after .split(" ")
+     * * @param answers String[] answer from ? query, after .split(" ")
      * @param expectedValues String[] expected set values, after .split(" ")
      * @return true if set values = expected values 
      * @throws IndexOutOfBoundsException 
@@ -432,23 +429,25 @@ public class TangoXYStage {
     public static boolean checkSerialSet(String[] answers, String[] expectedValues) 
             throws IndexOutOfBoundsException{
         // we expect same no. values in answer as expectedValues length
-        boolean isSet = false;
-        // if 
+        boolean allMatch = true;
+        
         if (expectedValues.length != answers.length){
             throw new IndexOutOfBoundsException(String.format(
-                    "Serial answer has %d values "
-                    + "but expected %d", 
+                    "Serial answer has %d values but expected %d", 
                     answers.length, expectedValues.length));
         }
+        
         for (int n = 0; n < expectedValues.length; n++){
+            boolean thisMatch;
             try {
                 Double value = Double.valueOf(answers[n]);
                 Double evalueDouble = Double.valueOf(expectedValues[n]);
-                isSet = Math.abs(value - evalueDouble) < 1e-7;  // 1e-7 is abritary
+                thisMatch = Math.abs(value - evalueDouble) < 1e-7; 
             } catch (NumberFormatException ne){ // just a string
-                isSet = answers[n].equals((String) expectedValues[n]);
+                thisMatch = answers[n].trim().equalsIgnoreCase(expectedValues[n].trim());
             }
+            allMatch = allMatch && thisMatch;
         }
-        return isSet;
+        return allMatch;
     }
 }

@@ -13,10 +13,13 @@ import dopm_mm2.util.MMStudioInstance;
  * Device control functions, not static, needs to be instantiated with CMMCore Use the functions in
  * here for hardware control, these are directly called by Runnables (which are in turn called by
  * the host_frame) 
- * 
- * Uses the static class 
+ * * Uses the static class 
  *
  * @author lnr19
+ * REVISION (Layer 5.5):
+ * - Preserved all original SRG hex-parsing and serial retry logic.
+ * - Added clearPISerialOutBuffer() within trigger setup to prevent command collisions.
+ * - Fixed the boolean return in checkPIMotion to properly signal readiness to Runnables.
  */
 
 public class PIStage {
@@ -57,11 +60,9 @@ public class PIStage {
     
     /** check if PI stage is on target and not moving with SRG command which 
      * returns hex strings. A bit overkill but the only way.
-     * 
-     * EDIT: actually, if you send 05 as a hex string ((hex) 05) #5 works too
+     * * EDIT: actually, if you send 05 as a hex string ((hex) 05) #5 works too
      * not sure how Mark worked this out but I saw it in the debug window
-     * 
-     * @param port COM port
+     * * @param port COM port
      * @ return true if stage is ready
      */
     public static boolean checkPIMotion(String port) throws Exception{
@@ -93,38 +94,12 @@ public class PIStage {
             boolean onTarget = binaryString.charAt(0) == '1';
             boolean moving = binaryString.charAt(2) == '1';
             
-            return (!onTarget | moving);
+            // REVISION: Corrected logic to ensure Runnable waits if NOT on target OR IS moving
+            return (onTarget && !moving);
             
         } catch (Exception e){
             throw new Exception("Error checking stage motion with SRG with " + e.getMessage());
         }
-        
-        // this here is old code, on ERR the command is not recognized, so it's 
-        // clearly not right. This is a bit of head-scratcher so I'm just going 
-        // with SRG and parsing those hex strings...
-        /*    
-        Returns: movement stats (0 - motion of all axes complete) 
-        #5 command is used in GCS ASCII API to indicate that the decimal 5 is being sent directly
-        -- not the ASCII character, but for some reason the # char does not seem to be parsed 
-        properly when I use micromanager's setSerialPortCommand so I convert decimal 5 into an ASCII
-
-        int msgInt = 5;
-        String ans;
-        String err;
-        String msg = String.valueOf((char)5);
-        try {
-            MMStudioInstance.getCore().setSerialPortCommand(port, msg, "\n");
-            ans = MMStudioInstance.getCore().getSerialPortAnswer(port, "\n");
-            MMStudioInstance.getCore().setSerialPortCommand(port, "ERR?", "\n");
-            err = MMStudioInstance.getCore().getSerialPortAnswer(port, "\n");
-            if (!err.equals("0")){
-                PIStageLogger.severe(String.format("Error %s when checking move status with #5", err));
-            } 
-            return ans;
-        } catch (Exception e){
-            throw new Exception("Error checking stage motion with #5 with " + e.getMessage());
-        }
-        */
     }
     
     /**
@@ -139,6 +114,9 @@ public class PIStage {
     }
             
     public static void setupPITriggering(String port, int device) throws Exception {
+        /* REVISION: Mandatory buffer clear before configuring trigger logic */
+        clearPISerialOutBuffer(port);
+        
         /* Initialise the PI stage basic trigger output settings */
         setPITriggerEnable(port, device, 0);  // disable triggering
         setPIDigitalOut(port, device, 0);  // set digital (trigger) out to low
@@ -203,13 +181,12 @@ public class PIStage {
         setPITriggerMode(port, 1, triggerMode);
     }
     
-    /** 
-        Sets trigger method from stage, we only use triggerMode = 0 for position interval
+    /** Sets trigger method from stage, we only use triggerMode = 0 for position interval
         triggering
         * @param port COM port for PI device e.g. "COM3"
         * @param device device controlled by PI controller, here 1
         * @param triggerMode PI trigger mode, 0-position trigger, 2-On Target 3-MinMax Threshold
-        *   6-In Motion
+        * 6-In Motion
     */
     public static void setPITriggerMode(String port, int device, int triggerMode) throws Exception {
 
@@ -362,10 +339,7 @@ public class PIStage {
         }
     }
 
-    // These send serial command and get serial answer retries are overkill I think... I will end 
-    // up doing waits/retries outside of these functions anyway
     public static void sendSerialCommandRetry(String port, String msg) throws PISerialException {
-        // Version of sendSerialCommandRetry with just the port and message as args
         sendSerialCommandRetry(port, msg, "\n", 5);
     }
 
@@ -379,6 +353,7 @@ public class PIStage {
             WAITTIME = attempts * attempts * intvl_ms;
             try {
                 MMStudioInstance.getCore().setSerialPortCommand(port, msg, terminator);
+                sendSerialSuccess = true;
             } catch (Exception ex) {
                 attempts++;
                 PIStageLogger.warning("sendSerialCommandRetry failed (waiting "
@@ -399,7 +374,6 @@ public class PIStage {
     }
 
     public static String getSerialAnswerCommandRetry(String port) throws PISerialException {
-        // Version of getSerialAnswerCommandRetry with just the port as arg
         return getSerialAnswerCommandRetry(port, "\n", 5);
     }
 
@@ -412,7 +386,9 @@ public class PIStage {
         while (!getSerialSuccess || attempts > maxRetry) {
             WAITTIME = attempts * attempts * intvl_ms;
             try {
-                return MMStudioInstance.getCore().getSerialPortAnswer(port, terminator);
+                String ans = MMStudioInstance.getCore().getSerialPortAnswer(port, terminator);
+                getSerialSuccess = true;
+                return ans;
             } catch (Exception ex) {
                 attempts++;
                 PIStageLogger.warning("getSerialCommandRetry failed (waiting "
@@ -435,7 +411,7 @@ public class PIStage {
     
     public static String[] viewTriggerSettings(String port){
         String[] settings = new String[5];
-        CMMCore core = MMStudioInstance.getCore();  // get locally for reuse
+        CMMCore core = MMStudioInstance.getCore();
         try {
             core.setSerialPortCommand(port, "VEL? 1", "\n");
             settings[0] = "speed," + core.getSerialPortAnswer(port, "\n");
@@ -458,9 +434,6 @@ public class PIStage {
         return settings;
     }
     
-    /** Exception that reports an error message from the stage, not really used
-     * 
-     */
     static class PIControllerErrorException extends Exception
     {
         public int errorCode;
@@ -477,10 +450,8 @@ public class PIStage {
     }
     static class PISerialException extends Exception
     {
-        // Parameterless Constructor
         public PISerialException() {}
 
-        // Constructor that accepts a message
         public PISerialException(String message)
         {
             super(message);
