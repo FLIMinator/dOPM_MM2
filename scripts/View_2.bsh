@@ -1,0 +1,2 @@
+mmc.setConfig("dOPM View", "View 2");
+mmc.waitForConfig("dOPM View", "View 2");

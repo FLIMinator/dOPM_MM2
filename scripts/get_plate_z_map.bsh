@@ -1,0 +1,443 @@
+// ============================================================================
+// TI2 PFS PLATE SCAN: STATEFUL SEEDING + RECORD ZDRIVE (+PFS OFFSET)
+// ============================================================================
+//
+// What this script does (high level):
+//  1) Reads the *current* Micro-Manager Position List.
+//  2) Before doing anything, it moves to the FIRST position and demands that PFS
+//     can LOCK within a sensible time. If it cannot lock -> ABORT.
+//     If it can lock -> record the resulting ZDrive + PFSOffset as the initial
+//     "seed" (lastGoodZ, lastGoodO). This becomes the starting point for the scan.
+//  3) For each subsequent position:
+//       - Move XY (PFS can remain enabled; we do not forcibly unlock unless needed)
+//       - Optionally "seed" by setting ZDrive/PFSOffset to the last locked values
+//       - Wait for LOCK (using AutofocusPlugin.isContinuousFocusLocked())
+//       - If lock fails, optionally hunt ZDrive around the seed
+//       - When locked, wait for ZDrive to settle (stop changing), then record:
+//            a) ZDrive (microns)  -> written back into the Position List (if present)
+//            b) PFSOffset (device units) -> recorded in memory/log (cannot be written
+//               into your Position List unless those positions were saved with a
+//               PFSOffset stage entry)
+//       - Update the seed (lastGoodZ/lastGoodO) so the next position starts from
+//         the most recent successful lock.
+//       - Track locked/not-locked with a 0/1 array.
+//       - If lock fails, copy Z from the nearest previously locked XY (optional),
+//         and also update the seed so the scan can continue.
+//
+// Notes:
+//  - "ZDrive" here means the *mechanical focus drive* (in microns). This is what
+//    you wanted to store per position.
+//  - PFSOffset is also recorded (useful for diagnostics), but in your current
+//    Position List there is no stage entry for "PFSOffset", so we cannot write it.
+//
+// ============================================================================
+
+
+// ======================= CONFIG (TUNE THESE) =======================
+
+// Safety retract of ZDrive before XY moves.
+// Set to 0.0 to preserve the "PFS stays locked while ZDrive adjusts" behavior.
+// Set >0 only if you need collision avoidance between wells.
+double withdrawUm       = 0.0;
+
+// If lock fails, optionally hunt ZDrive around the seed value.
+// (hunt is in microns, because it moves the mechanical ZDrive)
+double searchRangeUm    = 150.0;   // +/- range for hunt
+double stepUm           = 10.0;    // step size during hunt
+
+// PFS maintenance timing:
+int maintSettleMs       = 300;     // small settle after enabling maintenance
+int lockTimeoutMs       = 4000;    // maximum time to wait for lock at each site
+int lockPollMs          = 200;     // poll interval while waiting for lock
+
+// Z settle detection: wait until ZDrive stops changing significantly.
+// This helps ensure you record ZDrive after it has finished adjusting under PFS control.
+double zSettleEpsUm      = 0.05;   // consider "stable" if |dz| <= eps
+int zSettleStableCount   = 3;      // must be stable for N consecutive polls
+int zSettlePollMs        = 200;    // poll interval for settle check
+int zSettleTimeoutMs     = 5000;   // max time to wait for Z settle
+
+
+// ======================= DEVICE / METHOD NAMES =======================
+//
+// These must match your system (you already confirmed these work):
+String pfsAfName        = "PFS";        // AutofocusManager method name
+String pfsStatusDev     = "PFS";        // MMCore device with "FocusMaintenance" + "PFS in Range"
+String pfsOffsetDev     = "PFSOffset";  // MMCore device for offset (device units)
+
+// Mechanical Z drive device. We assume mmc.getFocusDevice() is the real Z drive.
+// If it is NOT, then set it manually to your Z drive device name.
+String zDriveDev        = mmc.getFocusDevice();
+
+// XY stage device
+String xyStageDev       = mmc.getXYStageDevice();
+
+print("zDriveDev    = " + zDriveDev);
+print("pfsOffsetDev = " + pfsOffsetDev);
+print("xyStageDev   = " + xyStageDev);
+
+
+// ======================= AUTOF0CUS PLUGIN HANDLE =======================
+//
+// We use the AutofocusPlugin API ONLY for "locked?" state,
+// because it is more reliable than "in range" for deciding whether PFS is actually tracking.
+var afMgr = mm.getAutofocusManager();
+afMgr.refresh();
+afMgr.initialize();
+afMgr.setAutofocusMethodByName(pfsAfName);
+var af = afMgr.getAutofocusMethod();
+
+
+// ======================= SMALL HELPERS =======================
+
+// Turn PFS maintenance on/off through the device properties.
+// (This is what actually enables PFS to maintain focus continuously.)
+void enableMaintenance() {
+   try { mmc.setProperty(pfsStatusDev, "FocusMaintenance", "On"); }
+   catch (Exception e) { print("Error enabling maintenance: " + e); }
+}
+void disableMaintenance() {
+   try { mmc.setProperty(pfsStatusDev, "FocusMaintenance", "Off"); }
+   catch (Exception e) { print("Error disabling maintenance: " + e); }
+}
+
+// Ask the AF plugin whether continuous focus is *locked* (actively tracking).
+boolean isLocked() {
+   try { return af.isContinuousFocusLocked(); }
+   catch (Exception e) { return false; }
+}
+
+// Wait until locked or timeout.
+boolean waitForLocked(int timeoutMs) {
+   int waited = 0;
+   while (waited < timeoutMs) {
+      if (isLocked()) return true;
+      try { mmc.sleep(lockPollMs); } catch (Exception e) {}
+      waited += lockPollMs;
+   }
+   return isLocked();
+}
+
+// Wait for the ZDrive to stop changing (settle).
+// We consider it "settled" if the position changes by <= epsUm for stableCountNeeded polls.
+boolean waitForZDriveSettle(String zDev, double epsUm, int stableCountNeeded, int pollMs, int timeoutMs) {
+   double prev = mmc.getPosition(zDev);
+   int stableCount = 0;
+   int waited = 0;
+
+   while (waited < timeoutMs) {
+      try { mmc.sleep(pollMs); } catch (Exception e) {}
+
+      double cur = mmc.getPosition(zDev);
+      if (Math.abs(cur - prev) <= epsUm) {
+         stableCount++;
+         if (stableCount >= stableCountNeeded) return true;
+      } else {
+         stableCount = 0;
+      }
+
+      prev = cur;
+      waited += pollMs;
+   }
+   return false;
+}
+
+// StagePosition accessors vary slightly between MM builds.
+// These wrappers try both common signatures.
+double readStage1D(var sp, String devName) {
+   try { return sp.get1DPosition(); } catch (Exception e) {}
+   try { return sp.get1DPosition(devName); } catch (Exception e) {}
+   return Double.NaN;
+}
+
+// Read a stored 1D value for a given device from a MultiStagePosition entry.
+// Returns NaN if that device isn't stored in the position list.
+double read1DFromPosition(var msp, String devName) {
+   try {
+      var sp = msp.get(devName);
+      if (sp != null) return readStage1D(sp, devName);
+   } catch (Exception e) {}
+   return Double.NaN;
+}
+
+// Write a stored 1D value back into the MultiStagePosition entry.
+// Your MM build needs: set1DPosition(deviceName, value)
+void write1DToPosition(var msp, String devName, double val) {
+   var sp = null;
+   try { sp = msp.get(devName); } catch (Exception e) {}
+   if (sp == null) throw new RuntimeException("No stage entry for '" + devName + "'");
+   sp.set1DPosition(devName, val);
+}
+
+
+// ======================= OPTIONAL: HUNT ZDRIVE IF LOCK FAILS =======================
+//
+// This is a "last resort" to reacquire lock if PFS isn't locking at the current seed.
+// It scans ZDrive from (seed - searchRange) to (seed + searchRange) in stepUm,
+// enabling maintenance briefly at each step to see if lock occurs.
+//
+boolean huntZDriveForLock(double zStart) {
+
+   print(" -- HUNT ZDrive for lock starting at " + zStart + " um --");
+
+   double lower = zStart - searchRangeUm;
+   double upper = zStart + searchRangeUm;
+
+   // Start at the lower bound
+   try { mmc.setPosition(zDriveDev, lower); mmc.waitForDevice(zDriveDev); } catch (Exception e) {}
+
+   // Step upward until we lock or hit the upper bound
+   while (true) {
+
+      enableMaintenance();
+      try { mmc.sleep(maintSettleMs); } catch (Exception e) {}
+
+      if (waitForLocked(lockPollMs)) {
+         print("   Locked during hunt at ZDrive=" + mmc.getPosition(zDriveDev));
+         return true;
+      }
+
+      disableMaintenance();
+
+      double zCur = mmc.getPosition(zDriveDev);
+      if (zCur >= upper) break;
+
+      try { mmc.setRelativePosition(zDriveDev, stepUm); mmc.waitForDevice(zDriveDev); }
+      catch (Exception e) { break; }
+   }
+
+   // One last attempt
+   enableMaintenance();
+   try { mmc.sleep(maintSettleMs); } catch (Exception e) {}
+   return waitForLocked(lockTimeoutMs);
+}
+
+
+// ======================= MAIN: LOAD POSITION LIST =======================
+
+var posList = mm.positions().getPositionList();
+int n = posList.getNumberOfPositions();
+
+print("=== Starting stateful PFS scan ===");
+print("Positions = " + n);
+
+if (n <= 0) {
+   throw new RuntimeException("Position list is empty. Aborting.");
+}
+
+
+// ======================= STATE ARRAYS =======================
+//
+// lockedFlag[i] = 1 if locked at position i, else 0.
+// We also store a list of previously locked XY->(Z,Offset) so we can fall back to
+// the nearest locked site if a site fails.
+int[] lockedFlag = new int[n];
+
+double[] lockX = new double[n];
+double[] lockY = new double[n];
+double[] lockZ = new double[n];
+double[] lockO = new double[n];
+int nLocked = 0;
+
+
+// ======================= SEEDS: last known good lock =======================
+//
+// These seeds are what you wanted: the next site starts from the last site
+// that successfully locked.
+double lastGoodZ = Double.NaN;
+double lastGoodO = Double.NaN;
+
+
+// ============================================================================
+// STARTUP GATE: DO NOT PROCEED UNLESS FIRST POSITION LOCKS
+// ============================================================================
+//
+// Your requirement: "script will not start unless the start position is already
+// in focus".
+// Implementation:
+//   - Move to the first position (index 0) in the position list
+//   - Enable PFS maintenance
+//   - Wait for lock; if it doesn't lock -> ABORT
+//   - If it locks -> wait for Z settle and record ZDrive+Offset as initial seeds
+//
+{
+   var msp0 = posList.getPosition(0);
+   String label0 = msp0.getLabel();
+   double x0 = msp0.getX();
+   double y0 = msp0.getY();
+
+   print("\n=== STARTUP CHECK: moving to FIRST position: " + label0 + " ===");
+
+   // Optional safety retract
+   if (withdrawUm != 0.0) {
+      try { mmc.setRelativePosition(zDriveDev, -withdrawUm); mmc.waitForDevice(zDriveDev); } catch (Exception e) {}
+   }
+
+   // Move XY to first position
+   try { mmc.setXYPosition(x0, y0); mmc.waitForDevice(xyStageDev); }
+   catch (Exception e) { throw new RuntimeException("Failed to move to first position: " + e); }
+
+   // Turn maintenance on and demand lock
+   enableMaintenance();
+   try { mmc.sleep(maintSettleMs); } catch (Exception e) {}
+
+   boolean locked0 = waitForLocked(lockTimeoutMs);
+   if (!locked0) {
+      // Don't continue. This is your "must be in focus to start" gate.
+      disableMaintenance();
+      throw new RuntimeException("ABORT: PFS did not lock at the first position (" + label0 + ").");
+   }
+
+   // If locked, wait for ZDrive to settle then record seeds
+   boolean settled0 = waitForZDriveSettle(zDriveDev, zSettleEpsUm, zSettleStableCount, zSettlePollMs, zSettleTimeoutMs);
+
+   try { lastGoodZ = mmc.getPosition(zDriveDev); } catch (Exception e) {}
+   try { lastGoodO = mmc.getPosition(pfsOffsetDev); } catch (Exception e) {}
+
+   print("STARTUP OK: locked=" + locked0 + " settled=" + settled0 +
+         "  initial ZDrive=" + lastGoodZ + "  initial PFSOffset=" + lastGoodO);
+
+   // Mark position 0 as locked + store it as a locked reference point
+   lockedFlag[0] = 1;
+   lockX[nLocked] = x0; lockY[nLocked] = y0; lockZ[nLocked] = lastGoodZ; lockO[nLocked] = lastGoodO;
+   nLocked++;
+
+   // Write ZDrive back into the list for position 0 (if stage entry exists)
+   try { write1DToPosition(msp0, zDriveDev, lastGoodZ); posList.replacePosition(0, msp0); }
+   catch (Exception e) { print("WARN: can't write " + zDriveDev + " into position list for first position: " + e); }
+}
+
+
+// ============================================================================
+// MAIN SCAN LOOP (starts at i=1 because i=0 is handled above)
+// ============================================================================
+for (int i = 1; i < n; i++) {
+
+   var msp = posList.getPosition(i);
+   String label = msp.getLabel();
+   double x = msp.getX();
+   double y = msp.getY();
+
+   // The seed is ALWAYS the most recent successful lock:
+   double zSeed = lastGoodZ;
+   double oSeed = lastGoodO;
+
+   // If for some reason the seed is NaN, try to fall back to whatever is stored in the position list.
+   if (Double.isNaN(zSeed)) zSeed = read1DFromPosition(msp, zDriveDev);
+
+   print("\n--- Position " + i + "  " + label + " ---");
+   print("Seed (from last lock): ZDrive=" + zSeed + "  PFSOffset=" + oSeed);
+
+   // Optional retract (collision safety)
+   if (withdrawUm != 0.0) {
+      try { mmc.setRelativePosition(zDriveDev, -withdrawUm); mmc.waitForDevice(zDriveDev); } catch (Exception e) {}
+   }
+
+   // 1) Move to XY
+   try { mmc.setXYPosition(x, y); mmc.waitForDevice(xyStageDev); }
+   catch (Exception e) { print("Err moving XY: " + e); }
+
+   // 2) Restore seed values as the starting point (this is your "hunt from last lock")
+   //    If PFS is locked, it may still adjust ZDrive; this just provides a good starting estimate.
+   try { if (!Double.isNaN(zSeed)) { mmc.setPosition(zDriveDev, zSeed); mmc.waitForDevice(zDriveDev); } } catch (Exception e) {}
+   try { if (!Double.isNaN(oSeed)) { mmc.setPosition(pfsOffsetDev, oSeed); mmc.waitForDevice(pfsOffsetDev); } } catch (Exception e) {}
+
+   // 3) Ensure maintenance is on and wait for lock
+   enableMaintenance();
+   try { mmc.sleep(maintSettleMs); } catch (Exception e) {}
+
+   boolean locked = waitForLocked(lockTimeoutMs);
+
+   // 4) If not locked, optionally hunt ZDrive around the seed
+   if (!locked) {
+      print("*** WARNING: not locked; hunting ZDrive around seed ***");
+      locked = huntZDriveForLock(Double.isNaN(zSeed) ? mmc.getPosition(zDriveDev) : zSeed);
+   }
+
+   // 5) Record values (only meaningful if locked)
+   if (locked) {
+
+      // Wait until ZDrive stops changing (so we record after PFS adjustments)
+      boolean settled = false;
+      try { settled = waitForZDriveSettle(zDriveDev, zSettleEpsUm, zSettleStableCount, zSettlePollMs, zSettleTimeoutMs); }
+      catch (Exception e) {}
+
+      double zFinal = Double.NaN;
+      double oFinal = Double.NaN;
+      try { zFinal = mmc.getPosition(zDriveDev); } catch (Exception e) {}
+      try { oFinal = mmc.getPosition(pfsOffsetDev); } catch (Exception e) {}
+
+      print("Locked=" + locked + "  Settled=" + settled +
+            "  ZDrive=" + zFinal + "  PFSOffset=" + oFinal);
+
+      // Update the seed for the NEXT position (this is the stateful part you wanted)
+      lastGoodZ = zFinal;
+      lastGoodO = oFinal;
+
+      // Update flags + nearest-fallback store
+      lockedFlag[i] = 1;
+      lockX[nLocked] = x; lockY[nLocked] = y; lockZ[nLocked] = zFinal; lockO[nLocked] = oFinal;
+      nLocked++;
+
+      // Write ZDrive into the position list
+      try { write1DToPosition(msp, zDriveDev, zFinal); }
+      catch (Exception e) { print("WARN: can't write " + zDriveDev + " into position list: " + e); }
+
+      posList.replacePosition(i, msp);
+
+   } else {
+
+      // Lock failed: mark 0 and (optionally) copy from nearest locked XY
+      lockedFlag[i] = 0;
+      print("*** WARNING: lock failed at '" + label + "'");
+
+      if (nLocked > 0) {
+         int best = -1;
+         double bestD2 = 1e300;
+
+         for (int k = 0; k < nLocked; k++) {
+            double dx = x - lockX[k];
+            double dy = y - lockY[k];
+            double d2 = dx*dx + dy*dy;
+            if (d2 < bestD2) { bestD2 = d2; best = k; }
+         }
+
+         double zFallback = lockZ[best];
+         double oFallback = lockO[best];
+
+         print("    fallback: nearest locked XY -> ZDrive=" + zFallback + "  PFSOffset=" + oFallback);
+
+         // Update seeds even on fallback (so next positions start from something plausible)
+         lastGoodZ = zFallback;
+         lastGoodO = oFallback;
+
+         // Write fallback ZDrive into list (so the list still gets a usable guess)
+         try { write1DToPosition(msp, zDriveDev, zFallback); }
+         catch (Exception e) { print("WARN: can't write fallback " + zDriveDev + ": " + e); }
+
+         posList.replacePosition(i, msp);
+      }
+   }
+}
+
+
+// ======================= COMMIT POSITION LIST =======================
+//
+// This replaces the position list in MM with our updated version.
+// (You can save it from the UI after the script finishes.)
+mm.positions().setPositionList(posList);
+
+
+// ======================= SUMMARY REPORT =======================
+
+print("\n=== SUMMARY ===");
+int totalLocked = 0;
+for (int i = 0; i < n; i++) totalLocked += lockedFlag[i];
+print("Locked " + totalLocked + " / " + n);
+
+// Print the 0/1 vector so you can quickly see which sites failed
+String s = "";
+for (int i = 0; i < n; i++) { s += lockedFlag[i]; if (i < n-1) s += ","; }
+print("lockedFlags (0/1): " + s);
+
+print("=== Done ===");

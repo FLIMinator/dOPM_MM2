@@ -1,0 +1,14 @@
+// Find current Nikon PFS offset (requires PFS lock)
+
+mm.getAutofocusManager().setAutofocusMethodByName("PFS");
+var af = mm.getAutofocusManager().getAutofocusMethod();
+
+af.enableContinuousFocus(false);
+mmc.sleep(300);
+
+if (!af.isContinuousFocusLocked()) {
+   print("WARNING: PFS not locked; offset may be meaningless.");
+}
+
+double offset = mmc.getPosition("PFSOffset");  // your system's offset device
+print("PFSOffset = " + offset);

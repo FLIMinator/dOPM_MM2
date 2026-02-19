@@ -1,0 +1,344 @@
+import ij.*;
+import ij.process.*;
+import ij.io.*;
+import java.io.*;
+import java.util.*;
+import java.util.regex.*;
+import ij.process.Blitter;
+
+// -------------------- USER SETTINGS --------------------
+String inputDir = "D:\\Sasha\\micromanager\\20260204\\_7";
+int gridCols = 3;
+int gridRows = 3;
+
+// Flip controls (stage-vs-image conventions)
+boolean flipY = true;   // if top/bottom are swapped, set true
+boolean flipX = false;  // if left/right are swapped, set true
+
+// If you only want certain wells, put them here. Leave empty for all.
+String[] onlyWells = new String[] { };  // e.g. { "B4", "B5" }
+// ------------------------------------------------------
+
+boolean restrictWells = (onlyWells != null && onlyWells.length > 0);
+HashSet only = new HashSet();
+if (restrictWells) {
+    for (int i=0; i<onlyWells.length; i++) only.add(onlyWells[i].toUpperCase());
+}
+
+int nTilesNeeded = gridCols * gridRows;
+
+// Detect Bio-Formats
+boolean hasBioFormats = false;
+try {
+    Class.forName("loci.plugins.BF");
+    hasBioFormats = true;
+} catch (Throwable e) {
+    hasBioFormats = false;
+}
+
+ImagePlus openAny(String path) {
+    if (hasBioFormats) {
+        try {
+            ImagePlus[] imps = loci.plugins.BF.openImagePlus(path);
+            if (imps != null && imps.length > 0) return imps[0];
+        } catch (Throwable t) {
+            IJ.log("Bio-Formats failed for: " + path + " -> fallback to IJ.openImage");
+        }
+    }
+    return IJ.openImage(path);
+}
+
+void logImpInfo(String label, ImagePlus imp) {
+    if (imp == null) { IJ.log(label + ": <null>"); return; }
+    IJ.log(label + ": W=" + imp.getWidth() + " H=" + imp.getHeight() +
+           " stackSize=" + imp.getStackSize() +
+           " C=" + Math.max(1, imp.getNChannels()) +
+           " Z=" + Math.max(1, imp.getNSlices()) +
+           " T=" + Math.max(1, imp.getNFrames()) +
+           " bitDepth=" + imp.getBitDepth() +
+           " title=" + imp.getTitle());
+}
+
+boolean saveSmart(ImagePlus imp, String outPath) {
+    FileSaver fs = new FileSaver(imp);
+    if (imp.getStackSize() > 1) return fs.saveAsTiffStack(outPath);
+    else return fs.saveAsTiff(outPath);
+}
+
+// -------------------- metadata helpers --------------------
+String readAll(String path) {
+    try {
+        BufferedReader br = new BufferedReader(new FileReader(path));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = br.readLine()) != null) sb.append(line).append("\n");
+        br.close();
+        return sb.toString();
+    } catch (Exception e) {
+        return null;
+    }
+}
+
+Double extractFirstNumber(String text, String[] keyCandidates) {
+    for (int i=0; i<keyCandidates.length; i++) {
+        String key = keyCandidates[i];
+        Pattern p = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*([-+]?\\d+(?:\\.\\d+)?)");
+        Matcher m = p.matcher(text);
+        if (m.find()) {
+            try { return new Double(Double.parseDouble(m.group(1))); } catch (Exception e) {}
+        }
+    }
+    return null;
+}
+
+String[] X_KEYS = new String[] { "XPositionUm", "XPosition_um", "XPosition", "StageX", "StageXUm" };
+String[] Y_KEYS = new String[] { "YPositionUm", "YPosition_um", "YPosition", "StageY", "StageYUm" };
+
+// -------------------- tiling helpers --------------------
+double[] uniqueSorted(List vals, double tol) {
+    ArrayList a = new ArrayList();
+    for (int i=0; i<vals.size(); i++) a.add(vals.get(i));
+    Collections.sort(a);
+
+    ArrayList uniq = new ArrayList();
+    for (int i=0; i<a.size(); i++) {
+        double v = ((Double) a.get(i)).doubleValue();
+        if (uniq.size() == 0) {
+            uniq.add(new Double(v));
+        } else {
+            double last = ((Double) uniq.get(uniq.size()-1)).doubleValue();
+            if (Math.abs(v - last) > tol) uniq.add(new Double(v));
+        }
+    }
+
+    double[] out = new double[uniq.size()];
+    for (int i=0; i<uniq.size(); i++) out[i] = ((Double) uniq.get(i)).doubleValue();
+    return out;
+}
+
+int nearestIndex(double[] centers, double v) {
+    int best = -1;
+    double bestD = Double.POSITIVE_INFINITY;
+    for (int i=0; i<centers.length; i++) {
+        double d = Math.abs(v - centers[i]);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+
+class TileInfo {
+    String path;
+    int site;
+    double x;
+    double y;
+    int row;
+    int col;
+    TileInfo(String p, int s, double xx, double yy) {
+        path=p; site=s; x=xx; y=yy; row=-1; col=-1;
+    }
+}
+
+// Pattern: _7_MMStack_B4-Site_3.ome.tif
+Pattern pat = Pattern.compile(".*_MMStack_([A-H]\\d+)-Site_(\\d+)\\.ome\\.tif$", Pattern.CASE_INSENSITIVE);
+
+File dir = new File(inputDir);
+if (!dir.exists() || !dir.isDirectory()) {
+    IJ.error("Not a directory: " + inputDir);
+    return;
+}
+File[] files = dir.listFiles();
+if (files == null) {
+    IJ.error("No files in: " + inputDir);
+    return;
+}
+
+// Map: well -> List<TileInfo>
+HashMap wellToTiles = new HashMap();
+String sampleTilePath = null;
+
+for (int i=0; i<files.length; i++) {
+    File f = files[i];
+    String name = f.getName();
+    Matcher m = pat.matcher(name);
+    if (!m.matches()) continue;
+
+    String well = m.group(1).toUpperCase();
+    if (restrictWells && !only.contains(well)) continue;
+
+    int site = Integer.parseInt(m.group(2));
+    String tilePath = f.getAbsolutePath();
+
+    // read metadata sidecar
+    String metaPath = tilePath.replace(".ome.tif", "_metadata.txt");
+    String txt = readAll(metaPath);
+    if (txt == null) {
+        IJ.log("Missing/unreadable metadata: " + metaPath + " (skipping tile)");
+        continue;
+    }
+
+    Double xd = extractFirstNumber(txt, X_KEYS);
+    Double yd = extractFirstNumber(txt, Y_KEYS);
+    if (xd == null || yd == null) {
+        IJ.log("Could not parse X/Y from: " + metaPath + " (skipping tile)");
+        continue;
+    }
+
+    ArrayList list = (ArrayList) wellToTiles.get(well);
+    if (list == null) {
+        list = new ArrayList();
+        wellToTiles.put(well, list);
+    }
+    list.add(new TileInfo(tilePath, site, xd.doubleValue(), yd.doubleValue()));
+
+    if (sampleTilePath == null) sampleTilePath = tilePath;
+}
+
+if (wellToTiles.size() == 0) {
+    IJ.error("No matching tiles found, or no metadata parsable.");
+    return;
+}
+
+IJ.log("Found wells: " + wellToTiles.keySet());
+
+// -------------------- DIAGNOSTICS --------------------
+IJ.log("---- DIAGNOSTICS: opening one tile ----");
+IJ.log("Sample: " + sampleTilePath);
+ImagePlus sample = openAny(sampleTilePath);
+logImpInfo("Opened sample", sample);
+if (sample == null) { IJ.error("Could not open sample tile."); return; }
+sample.close();
+// -----------------------------------------------------
+
+Iterator it = wellToTiles.keySet().iterator();
+while (it.hasNext()) {
+    String well = (String) it.next();
+    ArrayList tiles = (ArrayList) wellToTiles.get(well);
+
+    if (tiles.size() < nTilesNeeded) {
+        IJ.log("Skipping " + well + " (found " + tiles.size() + " tiles; need " + nTilesNeeded + ")");
+        continue;
+    }
+
+    // Use first nTilesNeeded tiles by site order
+    Collections.sort(tiles, new Comparator() {
+        public int compare(Object a, Object b) {
+            return ((TileInfo)a).site - ((TileInfo)b).site;
+        }
+    });
+    ArrayList tilesUse = new ArrayList();
+    for (int i=0; i<nTilesNeeded; i++) tilesUse.add(tiles.get(i));
+
+    // Build X/Y lists
+    ArrayList xs = new ArrayList();
+    ArrayList ys = new ArrayList();
+    double xMin=1e300,xMax=-1e300,yMin=1e300,yMax=-1e300;
+
+    for (int i=0; i<tilesUse.size(); i++) {
+        TileInfo t = (TileInfo) tilesUse.get(i);
+        xs.add(new Double(t.x));
+        ys.add(new Double(t.y));
+        if (t.x<xMin) xMin=t.x; if (t.x>xMax) xMax=t.x;
+        if (t.y<yMin) yMin=t.y; if (t.y>yMax) yMax=t.y;
+    }
+
+    double xTol = Math.max(1.0, (xMax - xMin) / (gridCols * 10.0));
+    double yTol = Math.max(1.0, (yMax - yMin) / (gridRows * 10.0));
+
+    double[] xCenters = uniqueSorted(xs, xTol);
+    double[] yCenters = uniqueSorted(ys, yTol);
+
+    java.util.Arrays.sort(xCenters);
+    java.util.Arrays.sort(yCenters);
+
+    // Apply flips by choosing how we map centers -> indices
+    double[] xLeftToRight = new double[xCenters.length];
+    if (flipX) {
+        for (int i=0; i<xCenters.length; i++) xLeftToRight[i] = xCenters[xCenters.length-1-i];
+    } else {
+        for (int i=0; i<xCenters.length; i++) xLeftToRight[i] = xCenters[i];
+    }
+
+    double[] yTopToBottom = new double[yCenters.length];
+    if (flipY) {
+        // row 0 uses MIN Y
+        for (int i=0; i<yCenters.length; i++) yTopToBottom[i] = yCenters[i];
+    } else {
+        // row 0 uses MAX Y
+        for (int i=0; i<yCenters.length; i++) yTopToBottom[i] = yCenters[yCenters.length-1-i];
+    }
+
+    // Assign each tile a row/col by nearest center
+    for (int i=0; i<tilesUse.size(); i++) {
+        TileInfo t = (TileInfo) tilesUse.get(i);
+        t.col = nearestIndex(xLeftToRight, t.x);
+        t.row = nearestIndex(yTopToBottom, t.y);
+    }
+
+    IJ.log("\n==== " + well + " computed tile layout (row,col) from stage X/Y ====");
+    for (int i=0; i<tilesUse.size(); i++) {
+        TileInfo t = (TileInfo) tilesUse.get(i);
+        IJ.log("  Site_" + t.site + " -> (r=" + t.row + ", c=" + t.col + ")  X=" + t.x + "  Y=" + t.y + "  " + new File(t.path).getName());
+    }
+
+    // Stitch
+    ImagePlus tile0 = openAny(((TileInfo) tilesUse.get(0)).path);
+    if (tile0 == null) { IJ.log("Failed to open first tile for " + well); continue; }
+
+    int tileW = tile0.getWidth();
+    int tileH = tile0.getHeight();
+    int C = Math.max(1, tile0.getNChannels());
+    int Z = Math.max(1, tile0.getNSlices());
+    int T = Math.max(1, tile0.getNFrames());
+    int nPlanes = Math.max(1, tile0.getStackSize());
+
+    int outW = tileW * gridCols;
+    int outH = tileH * gridRows;
+
+    ImageProcessor templateIp = tile0.getStack().getProcessor(1);
+    ImageStack outStack = new ImageStack(outW, outH);
+    for (int p=0; p<nPlanes; p++) outStack.addSlice(templateIp.createProcessor(outW, outH));
+
+    for (int i=0; i<tilesUse.size(); i++) {
+        TileInfo info = (TileInfo) tilesUse.get(i);
+        if (info.row < 0 || info.col < 0) { IJ.log("Bad row/col for " + info.path); continue; }
+
+        ImagePlus tile = openAny(info.path);
+        if (tile == null) { IJ.log("Failed to open tile: " + info.path); continue; }
+
+        if (tile.getWidth()!=tileW || tile.getHeight()!=tileH || tile.getStackSize()!=nPlanes) {
+            IJ.log("Mismatch (W/H/stackSize), skipping: " + info.path);
+            logImpInfo("Bad tile", tile);
+            tile.close();
+            continue;
+        }
+
+        int xOff = info.col * tileW;
+        int yOff = info.row * tileH;
+
+        ImageStack ts = tile.getStack();
+        for (int p=1; p<=nPlanes; p++) {
+            ImageProcessor ipTile = ts.getProcessor(p);
+            ImageProcessor ipOut  = outStack.getProcessor(p);
+            ipOut.copyBits(ipTile, xOff, yOff, Blitter.COPY);
+        }
+
+        tile.close();
+    }
+
+    ImagePlus out = new ImagePlus(well + "_stitched_" + gridCols + "x" + gridRows, outStack);
+    if (tile0.getStackSize() > 1) {
+        out.setDimensions(C, Z, T);
+        if (C>1 || Z>1 || T>1) out.setOpenAsHyperStack(true);
+    }
+    out.setCalibration(tile0.getCalibration());
+
+    String outPath = new File(inputDir, well + "_stitched_" + gridCols + "x" + gridRows + ".tif").getAbsolutePath();
+    IJ.log("Saving: " + outPath);
+    boolean ok = saveSmart(out, outPath);
+    if (!ok) IJ.log("Save failed: " + outPath);
+
+    tile0.close();
+    out.close();
+}
+
+IJ.log("Done.");

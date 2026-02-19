@@ -1,0 +1,166 @@
+// ===== Merge Z-map (per well) into Tile-map (per site) =====
+// Uses PositionList.load/save (works in MM 2.0 API)
+// Input labels like: "B11-Site_7" or "B11 Site 7" etc.
+// Output: tile-map with ZDrive injected per well.
+
+import java.io.File;
+import java.util.regex.*;
+import java.util.HashMap;
+
+import org.micromanager.PositionList;
+import org.micromanager.MultiStagePosition;
+import org.micromanager.StagePosition;
+
+// ---------------- CONFIG ----------------
+String zMapPath    = "D:\\Sasha\\micromanager\\20260205\\zmap_60x_corrected_manually.pos";
+String tileMapPath = "D:\\Sasha\\micromanager\\20260205\\dOPM_tile_pattern.pos";
+String outPath     = "D:\\Sasha\\micromanager\\20260205\\60xzmap_merged_tilescan.pos";
+
+// Use the focus device (usually "ZDrive") unless you want to hardcode:
+String zDev = mmc.getFocusDevice();   // e.g. "ZDrive"
+print("Z device: " + zDev);
+
+print("Z-map:    " + zMapPath);
+print("Tile-map: " + tileMapPath);
+print("Output:   " + outPath);
+
+// ---------------- Helpers ----------------
+
+// Extract first well token like A1, B11, H12 from a label.
+String extractWell(String label) {
+   if (label == null) return null;
+   Pattern p = Pattern.compile("([A-Pa-p])\\s*0*([0-9]{1,2})");
+   Matcher m = p.matcher(label);
+   if (m.find()) {
+      String row = m.group(1).toUpperCase();
+      int col = Integer.parseInt(m.group(2));
+      return row + col; // e.g. "B11"
+   }
+   return null;
+}
+
+double getZFromMSP(MultiStagePosition msp, String dev) {
+   if (msp == null) return Double.NaN;
+   try {
+      StagePosition sp = msp.get(dev);
+      if (sp != null) {
+         // For 1D stages, "x" often stores the 1D coordinate in StagePosition
+         // BUT safer is to read from the StagePosition API when possible.
+         try {
+            // Some builds expose: sp.get1DPosition()
+            return sp.get1DPosition();
+         } catch (Exception e1) {
+            try {
+               // Some builds expose: sp.get1DPosition(dev)
+               return sp.get1DPosition(dev);
+            } catch (Exception e2) {
+               // Fallback: for 1D stage, value is usually in sp.getX()
+               try { return sp.getX(); } catch (Exception e3) {}
+            }
+         }
+      }
+   } catch (Exception e) {}
+   return Double.NaN;
+}
+
+void setZInMSP(MultiStagePosition msp, String dev, double z) {
+   if (msp == null) return;
+
+   // Ensure the MSP knows which stage is "default Z" (helps some code paths)
+   try { msp.setDefaultZStage(dev); } catch (Exception e0) {}
+
+   try {
+      StagePosition sp = msp.get(dev);
+      if (sp == null) {
+         sp = new StagePosition();
+         // Set as 1D stage position
+         try { sp.set1DPosition(dev, z); }
+         catch (Exception e1) {
+            try { sp.setStageName(dev); } catch (Exception e2) {}
+            try { sp.set1DPosition(z); } catch (Exception e3) {}
+         }
+         msp.add(sp);
+      } else {
+         // Update existing
+         try { sp.set1DPosition(dev, z); }
+         catch (Exception e1) {
+            try { sp.set1DPosition(z); }
+            catch (Exception e2) {
+               // last-ditch fallback
+               try { sp.setX(z); } catch (Exception e3) {}
+            }
+         }
+      }
+   } catch (Exception e) {
+      print("WARNING: Could not set Z for label=" + msp.getLabel() + " err=" + e);
+   }
+}
+
+// ---------------- Main ----------------
+
+// 1) Load both lists
+PositionList zList = new PositionList();
+zList.load(new File(zMapPath));
+
+PositionList tList = new PositionList();
+tList.load(new File(tileMapPath));
+
+// 2) Build well -> z lookup from zList
+HashMap wellToZ = new HashMap();
+
+int nz = zList.getNumberOfPositions();
+for (int i = 0; i < nz; i++) {
+   MultiStagePosition msp = zList.getPosition(i);
+   String label = msp.getLabel();
+   String well = extractWell(label);
+
+   if (well == null) {
+      print("Z-map: could not parse well from label: " + label);
+      continue;
+   }
+
+   double z = getZFromMSP(msp, zDev);
+   if (Double.isNaN(z)) {
+      print("Z-map: no Z found for well " + well + " label=" + label);
+      continue;
+   }
+
+   wellToZ.put(well, new Double(z));
+}
+
+print("Found Z values for " + wellToZ.size() + " wells (from " + nz + " Z-map positions).");
+
+// 3) Inject into tile list
+int nt = tList.getNumberOfPositions();
+int nMatched = 0;
+int nUnmatched = 0;
+
+for (int i = 0; i < nt; i++) {
+   MultiStagePosition msp = tList.getPosition(i);
+   String label = msp.getLabel();
+   String well = extractWell(label);
+
+   if (well == null) {
+      nUnmatched++;
+      continue;
+   }
+
+   Double zObj = (Double) wellToZ.get(well);
+   if (zObj == null) {
+      nUnmatched++;
+      continue;
+   }
+
+   setZInMSP(msp, zDev, zObj.doubleValue());
+   tList.replacePosition(i, msp);
+
+   nMatched++;
+}
+
+print("Tile positions:   " + nt);
+print("Matched+updated:  " + nMatched);
+print("Unmatched (no Z): " + nUnmatched);
+
+// 4) Save merged list
+tList.save(new File(outPath));
+print("DONE. Wrote: " + outPath);

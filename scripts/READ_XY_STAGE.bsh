@@ -1,0 +1,73 @@
+// BeanShell: Tango + MM readback diagnostics (no motion)
+// Edit if needed:
+String XY_STAGE_DEVICE = "XYStage";
+String XY_STAGE_SERIAL = "COM4";
+
+import mmcorej.CMMCore;
+import org.micromanager.Studio;
+
+Studio studio = mm;
+CMMCore core = mmc;
+
+String tangoErr(String port) {
+   try {
+      core.setSerialPortCommand(port, "err", "\r");
+      return core.getSerialPortAnswer(port, "\r").trim();
+   } catch (Throwable t) { return "ERR_READ_FAILED: " + t; }
+}
+
+String query(String port, String cmd) {
+   try {
+      core.setSerialPortCommand(port, cmd, "\r");
+      String ans = core.getSerialPortAnswer(port, "\r");
+      String e = tangoErr(port);
+      return (ans==null ? "" : ans.trim()) + "   (err=" + e + ")";
+   } catch (Throwable t) {
+      return "FAILED: " + t;
+   }
+}
+
+print("========== MM + TANGO DIAGNOSTICS ==========");
+
+// ---- Micro-Manager side ----
+try {
+   double x = core.getXPosition(XY_STAGE_DEVICE);
+   double y = core.getYPosition(XY_STAGE_DEVICE);
+   print("MM positions: X=" + x + " um, Y=" + y + " um");
+} catch (Throwable t) {
+   print("MM positions: FAILED: " + t);
+}
+
+try {
+   String sx = core.getProperty(XY_STAGE_DEVICE, "SpeedX [mm/s]");
+   String sy = core.getProperty(XY_STAGE_DEVICE, "SpeedY [mm/s]");
+   print("MM speed props: SpeedX=" + sx + " mm/s, SpeedY=" + sy + " mm/s");
+} catch (Throwable t) {
+   print("MM speed props: not available: " + t);
+}
+
+try {
+   String port = core.getProperty(XY_STAGE_DEVICE, "Port");
+   print("MM stage 'Port' property: " + port);
+} catch (Throwable t) {
+   print("MM stage 'Port' property: not available: " + t);
+}
+
+// ---- Tango serial side ----
+print("--- Tango serial readbacks on " + XY_STAGE_SERIAL + " ---");
+print("?statusaxis -> " + query(XY_STAGE_SERIAL, "?statusaxis"));
+print("?trig      -> " + query(XY_STAGE_SERIAL, "?trig"));
+print("?triga     -> " + query(XY_STAGE_SERIAL, "?triga"));
+print("?trigr     -> " + query(XY_STAGE_SERIAL, "?trigr"));
+print("?dim x     -> " + query(XY_STAGE_SERIAL, "?dim x"));
+print("?dim y     -> " + query(XY_STAGE_SERIAL, "?dim y"));
+print("?trigd x   -> " + query(XY_STAGE_SERIAL, "?trigd x"));
+print("?trigd y   -> " + query(XY_STAGE_SERIAL, "?trigd y"));
+print("err        -> " + query(XY_STAGE_SERIAL, "err"));
+
+// These may or may not exist on your firmware; useful if they do:
+print("?vel x     -> " + query(XY_STAGE_SERIAL, "?vel x"));
+print("?vel y     -> " + query(XY_STAGE_SERIAL, "?vel y"));
+print("?secvel    -> " + query(XY_STAGE_SERIAL, "?secvel"));
+
+print("========== DONE ==========");

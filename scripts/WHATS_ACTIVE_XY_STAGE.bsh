@@ -1,0 +1,21 @@
+import mmcorej.CMMCore;
+CMMCore core = mmc;
+String PORT = "COM4";
+
+String q(String cmd) throws Exception {
+  core.setSerialPortCommand(PORT, cmd, "\r");
+  String ans = core.getSerialPortAnswer(PORT, "\r");
+  core.setSerialPortCommand(PORT, "err", "\r");
+  String e = core.getSerialPortAnswer(PORT, "\r");
+  print(cmd + " -> [" + (ans==null?"":ans.trim()) + "]  err=" + (e==null?"":e.trim()));
+  return ans==null?"":ans.trim();
+}
+
+print("=== TANGO STATUS CHECK ===");
+q("?statusaxis");
+q("?trig");
+q("?triga");
+q("?trigr");
+q("?vel x");
+q("?vel y");
+q("err");

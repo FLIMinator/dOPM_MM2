@@ -1,0 +1,46 @@
+// ===== Find Nikon PFS offset (robust) =====
+
+var afMgr = mm.getAutofocusManager();
+afMgr.refresh();
+afMgr.initialize();
+
+// 1) Select the autofocus method that exists on your system
+String desiredAF = "PFS";
+afMgr.setAutofocusMethodByName(desiredAF);
+print("Selected autofocus method: " + desiredAF);
+
+var af = afMgr.getAutofocusMethod();
+
+// 2) Enable continuous focus + check lock
+af.enableContinuousFocus(true);
+mmc.sleep(300);
+
+boolean locked = false;
+try { locked = af.isContinuousFocusLocked(); } catch (Exception e) {}
+print("PFS locked? " + locked);
+print("AF status:\n" + af.getVerboseStatus());
+
+// 3) Find an offset device automatically
+String offsetDev = null;
+for (String d : mmc.getLoadedDevices()) {
+   String dl = d.toLowerCase();
+   if (dl.contains("tipfsoffset") || dl.contains("pfsoffset")) {
+      offsetDev = d;
+      break;
+   }
+}
+
+if (offsetDev == null) {
+   print("ERROR: Could not find an offset device (name containing 'TIPFSOffset' or 'PFSOffset').");
+   print("Loaded devices:");
+   for (String d : mmc.getLoadedDevices()) print("  - " + d);
+   throw new RuntimeException("No PFS offset device found");
+}
+
+print("Using offset device: " + offsetDev);
+
+// 4) Read the offset position (adapter units, not um)
+double offset = mmc.getPosition(offsetDev);
+print("PFS offset (Position units): " + offset);
+
+

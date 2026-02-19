@@ -1,0 +1,74 @@
+// BeanShell: Tango STOP + reset triggers (best-effort)
+// Edit these two if needed:
+String XY_STAGE_DEVICE = "XYStage";
+String XY_STAGE_SERIAL = "COM4";
+
+import mmcorej.CMMCore;
+import org.micromanager.Studio;
+
+Studio studio = mm;
+CMMCore core = mmc;
+
+String tangoErr(String port) {
+   try {
+      core.setSerialPortCommand(port, "err", "\r");
+      return core.getSerialPortAnswer(port, "\r").trim();
+   } catch (Throwable t) { return "ERR_READ_FAILED: " + t; }
+}
+
+void send(String port, String cmd) {
+   try {
+      print("SEND: " + cmd);
+      core.setSerialPortCommand(port, cmd, "\r");
+      String e = tangoErr(port);
+      print("  err=" + e);
+   } catch (Throwable t) {
+      print("  FAILED: " + t);
+   }
+}
+
+String query(String port, String cmd) {
+   try {
+      print("QUERY: " + cmd);
+      core.setSerialPortCommand(port, cmd, "\r");
+      String ans = core.getSerialPortAnswer(port, "\r");
+      String e = tangoErr(port);
+      print("  ans=[" + (ans==null?"":ans.trim()) + "] err=" + e);
+      return ans==null ? "" : ans.trim();
+   } catch (Throwable t) {
+      print("  FAILED: " + t);
+      return "";
+   }
+}
+
+print("========== TANGO STOP / RESET ==========");
+
+// 1) Stop triggers so the stage isn't generating pulses while you debug
+send(XY_STAGE_SERIAL, "!trig 0");
+query(XY_STAGE_SERIAL, "?trig");
+
+// 2) Try Tango stop commands (different firmwares use different names)
+// These may fail on your firmware — that's ok.
+send(XY_STAGE_SERIAL, "!stop");
+send(XY_STAGE_SERIAL, "stop");
+send(XY_STAGE_SERIAL, "!abort");
+send(XY_STAGE_SERIAL, "abort");
+
+// 3) Also try stopping through the MM device adapter (if supported)
+try {
+   print("MM: stop(XYStage) via core.stop(XY_STAGE_DEVICE) ...");
+   core.stop(XY_STAGE_DEVICE);
+   print("  ok");
+} catch (Throwable t) {
+   print("  MM stop not supported or failed: " + t);
+}
+
+// 4) Give it a moment, then read status
+try { Thread.sleep(300); } catch (Throwable ignore) {}
+
+query(XY_STAGE_SERIAL, "?statusaxis");
+query(XY_STAGE_SERIAL, "?pos x");   // may or may not exist
+query(XY_STAGE_SERIAL, "?pos y");   // may or may not exist
+query(XY_STAGE_SERIAL, "err");
+
+print("========== DONE ==========");
