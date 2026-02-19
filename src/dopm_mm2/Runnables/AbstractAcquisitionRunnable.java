@@ -39,8 +39,7 @@ import loci.formats.meta.BaseMetadata;
  * When writing a new dOPM runnable that extends this abstract class, 
  * runSingleView is overloaded and you shouldn't need to do anything 
  * with run itself
- * 
- * @author Leo Rowe-Brown
+ * * @author Leo Rowe-Brown
  */
 public abstract class AbstractAcquisitionRunnable implements Runnable {
     
@@ -133,8 +132,13 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     System.currentTimeMillis()-endClockTimeMs));
         }
         try {
+            // REVISION: Added responsiveness to the GUI stop button
+            checkInterrupt();
             // wait until stage has reached position in position list
             core_.waitForSystem();
+        } catch (InterruptedException ie) {
+            handleInterrupt(ie);
+            return;
         } catch (Exception e){
             String msg = "Failed to wait for devices before "
                     + "acquisition with " + e.toString();
@@ -146,6 +150,8 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         
         // Set scan speed variables accordingly for mirror and xystage
         deviceSettings.updateCurrentScanSpeedsDuringAcq();
+        // REVISION: Snapshot system state for the log
+        deviceSettings.logSystemState();
                 
         // Enable external triggering if applicable, 
         // maybe move this for readability?
@@ -185,7 +191,11 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             // this config should be set automatically if it doesnt exist from 
             // PIViewPositions.txt (TODO)
             try { 
+                checkInterrupt();
                 currentAcq.setCurrentView(1);
+            } catch (InterruptedException ie) {
+                handleInterrupt(ie);
+                return;
             } catch (Exception e){
                 runnableLogger.severe("Failed to change to view 1 with " + e.toString()
                         + " check config dOPM View exists with preset View 1");
@@ -197,6 +207,9 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             try {
                 storeStageStartingPositions();
                 runSingleView(currentViewAngle);
+            } catch (InterruptedException ie) {
+                handleInterrupt(ie);
+                return;
             } catch (Exception e){
                 logErrorWithWindow(e);
                 
@@ -216,7 +229,11 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         if (deviceSettings.isView2Imaged()){
             runnableLogger.info("Acquiring view 2");
             try { 
+                checkInterrupt();
                 currentAcq.setCurrentView(2);
+            } catch (InterruptedException ie) {
+                handleInterrupt(ie);
+                return;
             } catch (Exception e){
                 runnableLogger.severe("Failed to change to view 2 with " + e.toString()
                         + "check config dOPM View exists with preset View 2");
@@ -225,6 +242,9 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             try {
                 storeStageStartingPositions();
                 runSingleView(currentViewAngle);
+            } catch (InterruptedException ie) {
+                handleInterrupt(ie);
+                return;
             } catch (Exception e){
                 logErrorWithWindow(e);
             } finally {
@@ -260,6 +280,23 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     public void runSingleView(double currentViewAngle) throws Exception{
         // MAIN BODY OF CODE GOES HERE, use @Override
+    }
+
+    /** REVISION: checks internal flag and MDA status for responsiveness to "Stop" button. */
+    protected void checkInterrupt() throws InterruptedException {
+        boolean mdaIsStopped = !mm_.acquisitions().isAcquisitionRunning();
+        if (Thread.interrupted() || frame_.getInterruptFlag() || mdaIsStopped) {
+            throw new InterruptedException("Acquisition aborted by user.");
+        }
+    }
+
+    /** REVISION: Safely resets hardware after an interrupt. */
+    protected void handleInterrupt(InterruptedException ie) {
+        runnableLogger.warning("Interrupt detected: Resetting hardware to safe state...");
+        frame_.setInterruptFlag(false);
+        cleanupAcq();
+        setStagePositionsToStart();
+        switchOffLasers();
     }
 
     
@@ -335,8 +372,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     }
     
     /** Reset stage positions and change them to the travel speed (fast)
-     * 
-     */
+     * */
     protected void setStagePositionsToStart(){
         long start = System.currentTimeMillis();
         try {
@@ -360,6 +396,8 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     protected void setupCameraTriggering() throws Exception{
         long start = System.currentTimeMillis();
+        // REVISION: Mandatory enforcement of ScanMode 3 for readout timing accuracy
+        core_.setProperty(camName, "ScanMode", "3");
         core_.setProperty(camName, "TriggerPolarity","POSITIVE");
         core_.setProperty(camName, "TRIGGER SOURCE","EXTERNAL");
         core_.setProperty(camName, "OUTPUT TRIGGER KIND[0]","EXPOSURE");
@@ -379,14 +417,14 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     
     // TODO overall the createDatastores to only receive propertyMap and just
-    // parse the fields of that. e.g. propertyMap contains zStepUm and gets 
+    // parse the fields of that. e.g. propertyMap contains zStepUm and gets
     // read into the summaryMetadata
     /**
      * Empty summaryMetadata, but supply custom PropertyMap
      * @param customPropertyMap propertyMap that gets built into summary metadata
      * @return empty datastore
      * @throws IOException
-     * @throws Exception 
+     * @throws Exception
      */
     protected Datastore createDatastore(PropertyMap customPropertyMap) 
             throws IOException, Exception {
@@ -399,7 +437,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
      * @param metadata summary metadata to put in datastore
      * @return empty datastore with summary metadata
      * @throws IOException
-     * @throws Exception 
+     * @throws Exception
      */
     protected Datastore createDatastore(SummaryMetadata metadata) 
             throws IOException, Exception {
@@ -409,10 +447,10 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     /** Create datastore for acquisition using the supplied data save path,
      * filename will be MMStack.
      * @param customPropertyMap property map to be created in runSingleView,
-     *   use PropertyMaps.builder to build the property map that has e.g. 
-     *   scan length, scan type, trigger distance, optional
+     * use PropertyMaps.builder to build the property map that has e.g. 
+     * scan length, scan type, trigger distance, optional
      * @param metadata summary metadata supplied so that e.g. z spacing is 
-     *   saved, optional
+     * saved, optional
      * @return the empty datastore with metadata
      * @throws IOException if datastore creation fails (in FileMM)
      */
@@ -526,7 +564,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
      * @param store
      * @param nFramesTotal
      * @return
-     * @throws Exception 
+     * @throws Exception
      */
     protected Datastore acquireTriggeredDataset(
             Datastore store, int nFramesTotal) 
@@ -549,17 +587,20 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         double frameTimeTotal = 0;
         int frameTimeout = timeOutMs; // if no frame received for 10s, time out
         
-        // TODO replace with actual numbers
-        double magnification = 20.0*1.406*(200.0/180.0);
-        double pxSizeUm = 6.5/magnification;
+        // REVISION Layer 9: Link math directly to DeviceSettingsManager
+        double magnification = deviceSettings.getMagnification(); // Uses dynamic GUI value
+        double pxSizeUm = 6.5 / magnification; // Calculated in sample plane
         
-        runnableLogger.info("Pixel size (um) is " + pxSizeUm);
+        runnableLogger.info("Pixel size (um) is " + pxSizeUm + " (System Magnification: " + magnification + ")");
         
         Metadata.Builder md = 
                 mm_.data().metadataBuilder().pixelSizeUm(pxSizeUm);
 
         while (nFrames < nFramesTotal && !timeout){
- 
+                
+                // REVISION: Poll Stop Button status inside loop
+                checkInterrupt();
+
                 double tic=System.currentTimeMillis();
                 double toc=tic;
 
@@ -571,7 +612,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                         // System.out.println("TAGS: " + img.tags.toString());
                         
                         // runnableLogger.info("Got tagged image:" + nFrames);
-                        Image tmp = mm_.data().convertTaggedImage(img);  // Image 
+                        Image tmp = mm_.data().convertTaggedImage(img);  // Image
 
                         // does this copy in memory? inefficient?
                         Image cbImg = tmp.copyWith(cb.p(nFrames).build(), 
@@ -581,6 +622,8 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                         nFrames++;
                     }
                     toc = System.currentTimeMillis(); 
+                    // REVISION: responsive during wait states
+                    if (toc - tic > 500) checkInterrupt();
                 }
                 if (toc-tic >= frameTimeout){
                     int dropped = (nFramesTotal-nFrames);
