@@ -132,13 +132,8 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     System.currentTimeMillis()-endClockTimeMs));
         }
         try {
-            // REVISION: Added responsiveness to the GUI stop button
-            checkInterrupt();
             // wait until stage has reached position in position list
             core_.waitForSystem();
-        } catch (InterruptedException ie) {
-            handleInterrupt(ie);
-            return;
         } catch (Exception e){
             String msg = "Failed to wait for devices before "
                     + "acquisition with " + e.toString();
@@ -150,8 +145,6 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         
         // Set scan speed variables accordingly for mirror and xystage
         deviceSettings.updateCurrentScanSpeedsDuringAcq();
-        // REVISION: Snapshot system state for the log
-        deviceSettings.logSystemState();
                 
         // Enable external triggering if applicable, 
         // maybe move this for readability?
@@ -191,11 +184,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             // this config should be set automatically if it doesnt exist from 
             // PIViewPositions.txt (TODO)
             try { 
-                checkInterrupt();
                 currentAcq.setCurrentView(1);
-            } catch (InterruptedException ie) {
-                handleInterrupt(ie);
-                return;
             } catch (Exception e){
                 runnableLogger.severe("Failed to change to view 1 with " + e.toString()
                         + " check config dOPM View exists with preset View 1");
@@ -207,9 +196,6 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             try {
                 storeStageStartingPositions();
                 runSingleView(currentViewAngle);
-            } catch (InterruptedException ie) {
-                handleInterrupt(ie);
-                return;
             } catch (Exception e){
                 logErrorWithWindow(e);
                 
@@ -229,11 +215,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         if (deviceSettings.isView2Imaged()){
             runnableLogger.info("Acquiring view 2");
             try { 
-                checkInterrupt();
                 currentAcq.setCurrentView(2);
-            } catch (InterruptedException ie) {
-                handleInterrupt(ie);
-                return;
             } catch (Exception e){
                 runnableLogger.severe("Failed to change to view 2 with " + e.toString()
                         + "check config dOPM View exists with preset View 2");
@@ -242,9 +224,6 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             try {
                 storeStageStartingPositions();
                 runSingleView(currentViewAngle);
-            } catch (InterruptedException ie) {
-                handleInterrupt(ie);
-                return;
             } catch (Exception e){
                 logErrorWithWindow(e);
             } finally {
@@ -280,23 +259,6 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     public void runSingleView(double currentViewAngle) throws Exception{
         // MAIN BODY OF CODE GOES HERE, use @Override
-    }
-
-    /** REVISION: checks internal flag and MDA status for responsiveness to "Stop" button. */
-    protected void checkInterrupt() throws InterruptedException {
-        boolean mdaIsStopped = !mm_.acquisitions().isAcquisitionRunning();
-        if (Thread.interrupted() || frame_.getInterruptFlag() || mdaIsStopped) {
-            throw new InterruptedException("Acquisition aborted by user.");
-        }
-    }
-
-    /** REVISION: Safely resets hardware after an interrupt. */
-    protected void handleInterrupt(InterruptedException ie) {
-        runnableLogger.warning("Interrupt detected: Resetting hardware to safe state...");
-        frame_.setInterruptFlag(false);
-        cleanupAcq();
-        setStagePositionsToStart();
-        switchOffLasers();
     }
 
     
@@ -359,6 +321,11 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             double stopAcqStart = System.currentTimeMillis();
             if (core_.isSequenceRunning()){
                 core_.stopSequenceAcquisition();
+                // RECENT IMPROVEMENT: Drain Buffer to prevent stall
+                int timeout = 0;
+                while (core_.getRemainingImageCount() > 0 && timeout < 200) {
+                    Thread.sleep(10); timeout++;
+                }
                 String err = String.format(
                         "Previous sequence wasn't ended, stopped in %.1f ms",
                         (System.currentTimeMillis() - stopAcqStart) );
@@ -379,9 +346,10 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             TangoXYStage.setTangoAxisSpeed(
                     XYStage, deviceSettings.getXyStageTravelSpeed());
             core_.setProperty(mirrorStage, "Velocity", 100);
-            // had previous issue of tango stage not being ready to move, fixed
-            TangoXYStage.setXyPosition(XYStage, startingXPositionUm, startingYPositionUm);
-            // core_.setXYPosition(XYStage, startingXPositionUm, startingYPositionUm);
+            
+            // RECENT OPTIMIZATION: Do not reset XY middle between colors to save time
+            // TangoXYStage.setXyPosition(XYStage, startingXPositionUm, startingYPositionUm);
+            
             if (!ZStage.equals("")) core_.setPosition(ZStage, startingZpositionUm);
             core_.setPosition(mirrorStage, startingMirrorPositionUm);
         } catch (Exception e){
@@ -396,7 +364,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     protected void setupCameraTriggering() throws Exception{
         long start = System.currentTimeMillis();
-        // REVISION: Mandatory enforcement of ScanMode 3 for readout timing accuracy
+        // RECENT IMPROVEMENT: Explicit ScanMode 3
         core_.setProperty(camName, "ScanMode", "3");
         core_.setProperty(camName, "TriggerPolarity","POSITIVE");
         core_.setProperty(camName, "TRIGGER SOURCE","EXTERNAL");
@@ -417,14 +385,14 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     
     // TODO overall the createDatastores to only receive propertyMap and just
-    // parse the fields of that. e.g. propertyMap contains zStepUm and gets
+    // parse the fields of that. e.g. propertyMap contains zStepUm and gets 
     // read into the summaryMetadata
     /**
      * Empty summaryMetadata, but supply custom PropertyMap
      * @param customPropertyMap propertyMap that gets built into summary metadata
      * @return empty datastore
      * @throws IOException
-     * @throws Exception
+     * @throws Exception 
      */
     protected Datastore createDatastore(PropertyMap customPropertyMap) 
             throws IOException, Exception {
@@ -437,7 +405,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
      * @param metadata summary metadata to put in datastore
      * @return empty datastore with summary metadata
      * @throws IOException
-     * @throws Exception
+     * @throws Exception 
      */
     protected Datastore createDatastore(SummaryMetadata metadata) 
             throws IOException, Exception {
@@ -503,7 +471,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             // possibly redudant, this was just used to save file
             
             runnableLogger.info("Getting more metadata");
-                       
+                        
             runnableLogger.info("angle " + currentViewAngle);
             runnableLogger.info("filter " + deviceSettings.getCurrentFilter());
             runnableLogger.info("laser " + deviceSettings.getCurrentLaser());
@@ -518,7 +486,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             runnableLogger.info("zSlice " + currentAcq.getCurrentAcqZ());
             runnableLogger.info("zSliceIdx " + currentAcq.getCurrentAcqZIdx());
             runnableLogger.info("time ms " + currentAcq.getCurrentAcqTime());
-            runnableLogger.info("time mins " + currentAcq.getCurrentAcqTime());
+            runnableLogger.info("time mins " + currentAcq.getCurrentAcqTime()/60000);
             runnableLogger.info("timeIdx" + currentAcq.getCurrentAcqTimeIdx());
 
 
@@ -544,7 +512,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     build();
         } catch (Exception e){
             runnableLogger.severe("Failed to create datastore metadata, falling"
-                            + " back to default summary metadata" + e.getMessage());
+                                    + " back to default summary metadata" + e.getMessage());
             myPropertyMap = PropertyMaps.builder().build();
         } 
 
@@ -564,7 +532,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
      * @param store
      * @param nFramesTotal
      * @return
-     * @throws Exception
+     * @throws Exception 
      */
     protected Datastore acquireTriggeredDataset(
             Datastore store, int nFramesTotal) 
@@ -587,20 +555,17 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         double frameTimeTotal = 0;
         int frameTimeout = timeOutMs; // if no frame received for 10s, time out
         
-        // REVISION Layer 9: Link math directly to DeviceSettingsManager
-        double magnification = deviceSettings.getMagnification(); // Uses dynamic GUI value
-        double pxSizeUm = 6.5 / magnification; // Calculated in sample plane
+        // TODO replace with actual numbers
+        double magnification = 20.0*1.406*(200.0/180.0);
+        double pxSizeUm = 6.5/magnification;
         
-        runnableLogger.info("Pixel size (um) is " + pxSizeUm + " (System Magnification: " + magnification + ")");
+        runnableLogger.info("Pixel size (um) is " + pxSizeUm);
         
         Metadata.Builder md = 
                 mm_.data().metadataBuilder().pixelSizeUm(pxSizeUm);
 
         while (nFrames < nFramesTotal && !timeout){
-                
-                // REVISION: Poll Stop Button status inside loop
-                checkInterrupt();
-
+ 
                 double tic=System.currentTimeMillis();
                 double toc=tic;
 
@@ -612,7 +577,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                         // System.out.println("TAGS: " + img.tags.toString());
                         
                         // runnableLogger.info("Got tagged image:" + nFrames);
-                        Image tmp = mm_.data().convertTaggedImage(img);  // Image
+                        Image tmp = mm_.data().convertTaggedImage(img);  // Image 
 
                         // does this copy in memory? inefficient?
                         Image cbImg = tmp.copyWith(cb.p(nFrames).build(), 
@@ -622,8 +587,6 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                         nFrames++;
                     }
                     toc = System.currentTimeMillis(); 
-                    // REVISION: responsive during wait states
-                    if (toc - tic > 500) checkInterrupt();
                 }
                 if (toc-tic >= frameTimeout){
                     int dropped = (nFramesTotal-nFrames);
@@ -633,7 +596,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     if (nFrames==0){
                         runnableLogger.severe("No frames acquired");
                         throw new TimeoutException("No frames acquired in triggered "
-                            + "acquisition. Check hardware and wiring");
+                                + "acquisition. Check hardware and wiring");
                     } else if (dropped > maxDroppedFrames) {
                         runnableLogger.severe("Not all frames acquired");
                         String msg = String.format(

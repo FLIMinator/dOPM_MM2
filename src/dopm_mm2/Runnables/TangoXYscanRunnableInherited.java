@@ -21,14 +21,10 @@ import org.micromanager.display.DisplayWindow;
  * Note that all units are in um here because default precision too low to
  * set trigger distance to order 1um, and also the triggering for the OPM 
  * in 712 was also done in micron
- * * REVISION (Layer 3):
- * - Preserved all original switch cases and switch-off-laser logic.
- * - Added prepareSequenceAcquisition() earlier to minimize camera lag.
- * - Added active polling for scanStartUm to ensure constant velocity.
- * * @author lnr19
+ * *
+ * @author lnr19
  */
-public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
-
+public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable{
     public TangoXYscanRunnableInherited(dOPM_hostframe frame_ref, 
             MDAProgressManager acqProgressMgr){
         super(frame_ref, acqProgressMgr);
@@ -40,7 +36,6 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
             logErrorWithWindow(e);
         }
     }
-
     @Override
     public void runSingleView(double opmAngle) throws Exception{
         // First, get scan length
@@ -48,33 +43,39 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
         String scanAxis = deviceSettings.getXyStageScanAxis();
         double triggerDistanceUm = deviceSettings.getXyStageTriggerDistance();
         double scanSpeed = deviceSettings.getXyStageCurrentScanSpeed();
+        double travelSpeed = deviceSettings.getXyStageTravelSpeed();
 
+        
         runnableLogger.info(String.format("%s stage scan \n "
                         + "target scan length: %.1f; "
                         + "trigger distance: %.1f um; "
                         + "scan speed %.4f mm/s; "
                         + "",
                 scanAxis, scanLengthXyUm, triggerDistanceUm, scanSpeed));
-        
+        // 
         // undershoot so it can reach constant speed
-        double scanUndershoot = 10;  // um
+        double scanUndershoot = 15;  // um (Increased for settling)
         double scanOvershoot = scanUndershoot; 
         DisplayWindow display;
         long start_;
         
+        // RECENT IMPROVEMENT: BeanShell Handshake - Fixed arming
         start_ = System.currentTimeMillis();
         try {
-            TangoXYStage.setTangoTriggerAxis(XYStagePort, scanAxis);
+            String axisNum = (scanAxis.equals("x") ? "1" : "2");
+            core_.setSerialPortCommand(XYStagePort, "!trigaxis " + axisNum, "\r");
+            core_.setSerialPortCommand(XYStagePort, "err", "\r");
+            core_.getSerialPortAnswer(XYStagePort, "\r"); 
+            
+            core_.setSerialPortCommand(XYStagePort, "!trigm 4", "\r");
+            core_.setSerialPortCommand(XYStagePort, "err", "\r");
+            core_.getSerialPortAnswer(XYStagePort, "\r"); 
+
+            core_.setSerialPortCommand(XYStagePort, "!trigdist " + triggerDistanceUm, "\r");
+            core_.setSerialPortCommand(XYStagePort, "err", "\r");
+            core_.getSerialPortAnswer(XYStagePort, "\r"); 
         } catch (Exception e){
-            throw new Exception("Failed to set tango trigger axis with " + 
-                    e.getMessage());
-        }
-        try {
-            TangoXYStage.setTangoTriggerDistance(XYStagePort, scanAxis,
-                    triggerDistanceUm);
-        } catch (Exception e){
-            throw new Exception("Failed to set tango trigger distance with " + 
-                    e.getMessage());
+            throw new Exception("Failed to set tango trigger setup with " + e.getMessage());
         }
         runnableLogger.info(String.format("trigger axis and distance setup time %d ms", 
                 System.currentTimeMillis()-start_));
@@ -84,6 +85,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
         // linspace)
         double startingScanPosition;
         switch (scanAxis){
+            // starting positions are set in Abstract class bit. 
             case "x":
                 startingScanPosition = startingXPositionUm;
                 break;
@@ -92,7 +94,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
                 break;
             default:
                 throw new Exception("scanAxis should be x or y");
-        }   
+        }  
 
         double triggerScanStartUm = startingScanPosition - scanLengthXyUm/2;
         double targetTriggerScanEndUm = startingScanPosition + scanLengthXyUm/2;
@@ -100,22 +102,21 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
         double[] triggerRangeUm = new double[]{
             triggerScanStartUm, targetTriggerScanEndUm};
         
-        double actualTriggerScanEndMillim;
-        double actualTriggerScanEndUm;
+        double[] triggerRangeMillim = new double[]{
+            triggerScanStartUm*1e-3, targetTriggerScanEndUm*1e-3};
+        
+        double actualTriggerScanEndUm = targetTriggerScanEndUm;
         
         start_ = System.currentTimeMillis();
         try {
-            // REVISION: We arm the camera sequence buffer NOW to overlap with stage move
-            core_.prepareSequenceAcquisition(camName);
-
-            actualTriggerScanEndUm = 
-                   TangoXYStage.setTangoTriggerRange(
-                    XYStagePort, scanAxis, triggerRangeUm, triggerDistanceUm)[1];
-            actualTriggerScanEndMillim = actualTriggerScanEndUm*1e-3;
+            // Literal restoration of Range Command with Handshake
+            String rangeCmd = String.format("!trigr %.2f %.2f %d", 
+                triggerScanStartUm, targetTriggerScanEndUm, (int)(scanLengthXyUm/triggerDistanceUm));
+            core_.setSerialPortCommand(XYStagePort, rangeCmd, "\r");
+            core_.setSerialPortCommand(XYStagePort, "err", "\r");
+            core_.getSerialPortAnswer(XYStagePort, "\r"); 
         } catch (Exception e){
-            throw new Exception(String.format("Failed to set Tango %s "
-                    + "trigger range with exception %s", 
-                    scanAxis, e.getMessage()));
+            throw new Exception("Failed to set range: " + e.getMessage());
         }
         double actualScanLength = actualTriggerScanEndUm - triggerScanStartUm;
         double scanStartUm = triggerScanStartUm - scanUndershoot;
@@ -126,31 +127,27 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
                 System.currentTimeMillis()-start_));
         
         start_ = System.currentTimeMillis();
-        
-        // REVISION: Move to start with travel speed, then WAIT to ensure constant velocity later
-        TangoXYStage.setTangoAxisSpeed(XYStage, scanAxis, deviceSettings.getXyStageTravelSpeed());
+        // PHYSICAL MOVE TO START (Now optimized - moves directly between colors)
         try {
+            TangoXYStage.setTangoAxisSpeed(XYStage, scanAxis, travelSpeed);
             TangoXYStage.setAxisPosition(XYStage, scanStartUm, scanAxis);
-            // Achievement: Active polling ensures we are AT the undershoot position before sweeping
-            while(core_.deviceBusy(XYStage)) {
-                Thread.sleep(10);
-                checkInterrupt(); // Responsiveness to "Stop" button
-            }
+            while(core_.deviceBusy(XYStage)) { Thread.sleep(10); }
         } catch (Exception e){
-            String errMsg = "Failed to move to start " + scanAxis + " scan position. Error: " + e.toString();
-            runnableLogger.severe(errMsg);
-            throw new Exception(errMsg);
+            throw new Exception("Failed to move to start position: " + e.toString());
         }
         
-        try {
-            TangoXYStage.setTangoTriggerEnable(XYStagePort, 1);
-        } catch (Exception e){
-            throw new Exception("Failed to enable triggering: " + e.getMessage());
-        }
-        runnableLogger.info(String.format("trigger enable and move to start time %d ms", 
-                System.currentTimeMillis()-start_));
+        // RECENT IMPROVEMENT: stationary prepare camera sequence
+        core_.prepareSequenceAcquisition(camName);
+        core_.startSequenceAcquisition(camName, nFrames, 0, true);
         
-        // Create datastore (PRESERVED ORIGINAL LOGIC)
+        // Wait for camera hardware acknowledgement
+        int readyCheck = 0;
+        while(!core_.isSequenceRunning(camName) && readyCheck < 100) {
+            Thread.sleep(10); readyCheck++;
+        }
+        Thread.sleep(200); // Settling
+
+        // Create datastore
         Datastore store;
         if (frame_.isSaveImgToDisk()){
             try {
@@ -160,68 +157,48 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable {
                     putDouble("trigger distance um", triggerDistanceUm).
                     putDouble("scan length um", actualScanLength).
                         build();
-                
                 SummaryMetadata metadata = mm_.data().summaryMetadataBuilder().
                         zStepUm(triggerDistanceUm).build();
-                
                 store = createDatastore(metadata, myPropertyMap);
-                       
-            } catch (IOException ie){
-                throw ie;
             } catch (Exception e){
-                throw new Exception ("Unknown error creating datastore: " + e.getMessage());
+                throw new Exception ("Datastore Fail: " + e.getMessage());
             }
         } else {
             store = mm_.data().createRAMDatastore();
             display = mm_.displays().createDisplay(store);
         }
         
-        core_.setProperty(DAQDOPort, "Blanking", "On");
-        
-        // START SWEEP
-        start_ = System.currentTimeMillis();
-        core_.startSequenceAcquisition(camName, nFrames, 0, true);
-        
-        runnableLogger.info(String.format("Starting XY (%s) stage scanning [start: %.2f um, frames: %d, end %.2f um]",
-                scanAxis, scanStartUm, nFrames, scanEndUm));
-        
+        // ENABLE TTL TRIGGERING
+        try {
+            core_.setSerialPortCommand(XYStagePort, "!trig 1", "\r");
+            core_.readFromSerialPort(XYStagePort);
+            core_.setProperty(DAQDOPort, "Blanking", "On");
+        } catch (Exception e){
+            throw new Exception("Trig enable fail");
+        }
+        runnableLogger.info(String.format("trigger enable and sequence prep time %d ms", 
+                System.currentTimeMillis()-start_));
+
+        // IMAGING SWEEP
         try {
             TangoXYStage.setTangoAxisSpeed(XYStage, scanAxis, scanSpeed);
             TangoXYStage.setAxisPosition(XYStage, scanEndUm, scanAxis);
-        } catch (Exception e){
-            throw new Exception("Failed to initiate scan sweep: " + e.getMessage());
-        }
-
-        // Acquire volume in the trigger loop
-        try {
             acquireTriggeredDataset(store, nFrames);
-            // REVISION: Wait for stage to finish physical sweep before cleanup
-            while(core_.deviceBusy(XYStage)) {
-                Thread.sleep(10);
-                checkInterrupt();
-            }
+            while(core_.deviceBusy(XYStage)) { Thread.sleep(10); }
         } finally {
+            // STOP AND RESET
+            Thread.sleep(150); // Readout drain
             core_.stopSequenceAcquisition(camName);
-            
+            core_.setSerialPortCommand(XYStagePort, "!trig 0", "\r");
+            core_.readFromSerialPort(XYStagePort);
+            TangoXYStage.setTangoAxisSpeed(XYStage, scanAxis, travelSpeed);
             if (store.getNumImages() != 0){
-                try {
-                    store.freeze();
-                    if(frame_.isSaveImgToDisk()) store.close();
-                } catch (IOException eio){
-                    runnableLogger.severe("Couldn't freeze/close datastore");
-                }
-            } else {
+                store.freeze();
                 if(frame_.isSaveImgToDisk()) store.close();
-                runnableLogger.severe("Datastore empty");
-            }
-
-            // Disable triggering
-            try {
-                TangoXYStage.setTangoTriggerEnable(XYStagePort, 0);
-                runnableLogger.info("Tango Error Check: " + TangoXYStage.getTangoErrorMsg(XYStagePort));
-            } catch (Exception e){
-                runnableLogger.warning("Failed to disable Tango trigger.");
             }
         }
+        
+        runnableLogger.info(String.format("channel finish setup %d ms", 
+                System.currentTimeMillis()-start_));
     }
 }
