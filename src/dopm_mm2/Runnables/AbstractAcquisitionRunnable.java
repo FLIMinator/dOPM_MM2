@@ -141,7 +141,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         deviceSettings.updateCurrentScanSpeedsDuringAcq();
                 
         try {
-            // HIGH SPEED TRIGGER SETUP
+            // Setup Camera Triggering using provided logic
             setupCameraTriggering();
             
             PIStage.setPITriggerLow(mirrorStagePort);
@@ -193,13 +193,15 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         } catch (Exception hardwareEx) {
             logErrorWithWindow("Hardware setup logic fail: " + hardwareEx.getMessage());
         } finally {
-            // VITAL SAFETY: Return camera to standard state even on crash/abort
+            // VITAL SAFETY: Return camera to internal sync even if acquisition fails or is aborted
             try {
                 stopCameraTriggering();
             } catch (Exception e){
                 runnableLogger.severe("Critical tidy-up fail: " + e.getMessage());
             }
-            if (currentAcq!=null) currentAcq.nextAcqPoint();
+            if (currentAcq!=null){
+                currentAcq.nextAcqPoint();
+            }
         }
         
         runnableLogger.info(String.format(
@@ -210,6 +212,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     
     public abstract void runSingleView(double currentViewAngle) throws Exception;
 
+    
     protected void logErrorWithWindow(Exception e){
         String msg = e.toString();
         logErrorWithWindow(msg);
@@ -220,11 +223,13 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         mm_.acquisitions().abortAcquisition();
         mm_.acquisitions().isAcquisitionRunning();
         mm_.acquisitions().clearRunnables();
+        
         acquisitionFailed = true;
         if (errorWindowsDuringAcq) dialogBoxes.acquisitionErrorWindow(msg);
     }
     
     protected void storeStageStartingPositions() throws Exception{
+        /** Store current positions of stage before acquisition. */
         try {
             startingXPositionUm = core_.getXPosition(XYStage);
             startingYPositionUm = core_.getYPosition(XYStage);
@@ -279,13 +284,11 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     XYStage, deviceSettings.getXyStageTravelSpeed());
             core_.setProperty(mirrorStage, "Velocity", 100);
             
-            // DIRECT START MOVE: We no longer Return-to-Center for XY between colors to save time
+            // RECENT OPTIMIZATION: Do not reset XY middle between colors to save time
             if (!ZStage.equals("")) core_.setPosition(ZStage, startingZpositionUm);
             core_.setPosition(mirrorStage, startingMirrorPositionUm);
         } catch (Exception e){
-            logErrorWithWindow("Failed to reset stage "
-                    + "positions after acquisition with " + 
-                    e.getMessage());
+            logErrorWithWindow("Failed to reset stage positions: " + e.getMessage());
         }
         runnableLogger.info(String.format(
                 "Time taken moving stages to start: %d ms",
@@ -296,7 +299,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         long start = System.currentTimeMillis();
         core_.setProperty(camName, "ScanMode", "3");
         
-        // ADDRESSING DELAYED MODE AND READOUT END (Manual Section 11.1.6.3)
+        // USING YOUR PROVIDED TRIGGER SETTINGS
         if (deviceSettings.getTriggerMode() == 2) {
             runnableLogger.info("Configuring Camera for MASTER PULSE START (Starter Pistol)");
             core_.setProperty(camName, "TRIGGER SOURCE", "MASTER PULSE");
@@ -322,7 +325,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 (System.currentTimeMillis() - start)));
     }
     
-    /** Reset camera state to prevent mode stickiness on Return to Live */
+    /** TIDY UP ON RETURN: Reset camera state using your provided logic */
     protected void stopCameraTriggering() throws Exception{
         core_.setProperty(camName, "TRIGGER SOURCE","INTERNAL");
         core_.setProperty(camName, "TRIGGER ACTIVE", "EDGE");
@@ -336,6 +339,21 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 customPropertyMap);
     }
     
+    /**
+     * Empty property map, but supply summary metadata *
+     * @param metadata summary metadata to put in datastore
+     * @return empty datastore with summary metadata
+     * @throws IOException
+     * @throws Exception 
+     */
+    protected Datastore createDatastore(SummaryMetadata metadata) 
+            throws IOException, Exception {
+        return createDatastore(metadata, PropertyMaps.builder().build());
+    }
+    
+    /** Create datastore for acquisition using the supplied data save path,
+     * filename will be MMStack.
+     */
     protected Datastore createDatastore(SummaryMetadata metadata, 
             PropertyMap customPropertyMap) throws IOException, Exception{
         double storeStartTime = System.currentTimeMillis();
@@ -361,8 +379,8 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         
         try {
             runnableLogger.info("creating datastore in " + dataSavePath);
-            store = FileMM.createDatastore(camName, dataSavePath, 
-                    true, separateMetadata, false);
+            // EXCLUSIVELY NDTIFF (last parameter true) for background saving
+            store = FileMM.createDatastore(camName, dataSavePath, true, separateMetadata, true);
         } catch (Exception e){
             throw new Exception("Failed to create datastore with " + e.getMessage());
         }
@@ -446,7 +464,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 grabbed = false;
                 while(toc-tic < timeOutMs && !grabbed){
                     if (core_.getRemainingImageCount() > 0){
-                        // TaggedImage popNext RESTORED
+                        // LITERAL REPO TaggedImage LOOP RESTORED
                         TaggedImage img = core_.popNextTaggedImage();	
                         Image tmp = mm_.data().convertTaggedImage(img);  
                         Image cbImg = tmp.copyWith(cb.p(nFrames).build(), md.build());
@@ -463,7 +481,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     if (nFrames==0){
                         throw new TimeoutException("No frames acquired in triggered acquisition.");
                     } else if (dropped > maxDroppedFrames) {
-                        throw new TimeoutException(String.format("%d frames dropped in triggered acquisition", dropped));
+                        throw new TimeoutException(String.format("%d frames dropped", dropped));
                     }
                 }
                 frameTimeTotal += (toc-tic);

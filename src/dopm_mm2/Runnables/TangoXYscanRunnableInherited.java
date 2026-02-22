@@ -48,7 +48,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable{
             core_.setProperty(camName, "MASTER PULSE INTERVAL", String.format("%.6f", cameraCycleMs/1000.0));
             core_.setProperty(camName, "MASTER PULSE BURST TIMES", nFrames);
             
-            // mm/s = (Slice Thickness um * Camera FPS) / 1000
+            // Sync Speed Calculation
             finalScanSpeed = (triggerDistanceUm * cameraFps) / 1000.0;
             runnableLogger.info(String.format("MASTER PULSE SYNC: Speed set to %.4f mm/s for physical limit of %.2f FPS", 
                     finalScanSpeed, cameraFps));
@@ -56,7 +56,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable{
             finalScanSpeed = deviceSettings.getXyStageCurrentScanSpeed();
         }
 
-        // SCOPE FIX: Calculate coordinates BEFORE they are used in the setup block
+        // Variable Scoping Calculation BEFORE try block
         double startingScanPosition;
         switch (scanAxis){
             case "x": startingScanPosition = startingXPositionUm; break;
@@ -68,7 +68,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable{
         double scanStartUm = triggerScanStartUm - 15;
         double scanEndUm = targetTriggerScanEndUm + 15;
         
-        // Restore Literal Unused Variables for repo fidelity
+        // Literal restoration of unused variables for repo fidelity
         double[] triggerRangeUm = new double[]{triggerScanStartUm, targetTriggerScanEndUm};
         double[] triggerRangeMillim = new double[]{triggerScanStartUm*1e-3, targetTriggerScanEndUm*1e-3};
 
@@ -105,7 +105,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable{
             TangoXYStage.setTangoAxisSpeed(XYStage, scanAxis, travelSpeed);
             TangoXYStage.setAxisPosition(XYStage, scanStartUm, scanAxis);
             while(core_.deviceBusy(XYStage)) { Thread.sleep(10); }
-        } catch (Exception e){ throw new Exception("Move failed: " + e.toString()); }
+        } catch (Exception e){ throw new Exception("Move failed"); }
         
         // CAMERA PREP
         core_.prepareSequenceAcquisition(camName);
@@ -114,7 +114,7 @@ public class TangoXYscanRunnableInherited extends AbstractAcquisitionRunnable{
         while(!core_.isSequenceRunning(camName) && readyCheck < 100) { Thread.sleep(10); readyCheck++; }
         Thread.sleep(200); 
 
-        // STATIONARY DATASTORE
+        // STATIONARY DATASTORE (Exclusive NDTIFF enabled)
         Datastore store = createDatastore(mm_.data().summaryMetadataBuilder().zStepUm(triggerDistanceUm).build(), 
                                         PropertyMaps.builder().putString("mode", "MasterPulseStart").build());
         
