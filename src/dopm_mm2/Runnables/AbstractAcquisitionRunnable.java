@@ -284,7 +284,9 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     XYStage, deviceSettings.getXyStageTravelSpeed());
             core_.setProperty(mirrorStage, "Velocity", 100);
             
-            // RECENT OPTIMIZATION: Do not reset XY middle between colors to save time
+            // THE DRIFT FIX: Restore the move back to the original Center coordinates
+            TangoXYStage.setXyPosition(XYStage, startingXPositionUm, startingYPositionUm);
+            
             if (!ZStage.equals("")) core_.setPosition(ZStage, startingZpositionUm);
             core_.setPosition(mirrorStage, startingMirrorPositionUm);
         } catch (Exception e){
@@ -299,7 +301,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         long start = System.currentTimeMillis();
         core_.setProperty(camName, "ScanMode", "3");
         
-        // USING YOUR PROVIDED TRIGGER SETTINGS
+        // YOUR VERIFIED TRIGGER SETTINGS
         if (deviceSettings.getTriggerMode() == 2) {
             runnableLogger.info("Configuring Camera for MASTER PULSE START (Starter Pistol)");
             core_.setProperty(camName, "TRIGGER SOURCE", "MASTER PULSE");
@@ -325,7 +327,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 (System.currentTimeMillis() - start)));
     }
     
-    /** TIDY UP ON RETURN: Reset camera state using your provided logic */
+    /** Reset camera state to prevent mode stickiness on Return to Live */
     protected void stopCameraTriggering() throws Exception{
         core_.setProperty(camName, "TRIGGER SOURCE","INTERNAL");
         core_.setProperty(camName, "TRIGGER ACTIVE", "EDGE");
@@ -387,21 +389,26 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         
         PropertyMap myPropertyMap; 
         try {
+            // Get my MDAProgressManager metadata
             runnableLogger.info("Getting more metadata");
+                        
             runnableLogger.info("angle " + currentViewAngle);
             runnableLogger.info("filter " + deviceSettings.getCurrentFilter());
             runnableLogger.info("laser " + deviceSettings.getCurrentLaser());
             runnableLogger.info("power " + deviceSettings.getCurrentLaserPower());
             runnableLogger.info("exposureMs " + core_.getExposure()); 
+            
             runnableLogger.info("positionLabel " + currentAcq.getCurrentAcqPositionLabel());
             runnableLogger.info("positionIdx " + currentAcq.getCurrentAcqPositionIdx());
             runnableLogger.info("channelGroup " + currentAcq.getCurrentAcqChannel().channelGroup());
             runnableLogger.info("channelIdx " + currentAcq.getCurrentAcqChannelIdx());
+            
             runnableLogger.info("zSlice " + currentAcq.getCurrentAcqZ());
             runnableLogger.info("zSliceIdx " + currentAcq.getCurrentAcqZIdx());
             runnableLogger.info("time ms " + currentAcq.getCurrentAcqTime());
             runnableLogger.info("time mins " + currentAcq.getCurrentAcqTime()/60000);
             runnableLogger.info("timeIdx" + currentAcq.getCurrentAcqTimeIdx());
+
 
             myPropertyMap = PropertyMaps.builder().
                 putDouble("angle", currentViewAngle).
@@ -424,17 +431,23 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 putAll(customPropertyMap).
                     build();
         } catch (Exception e){
+            runnableLogger.severe("Failed to create datastore metadata, falling"
+                                    + " back to default summary metadata" + e.getMessage());
             myPropertyMap = PropertyMaps.builder().build();
         } 
 
-        metadata = metadata.copyBuilder().userData(myPropertyMap).build();
+        // copy existing metadata (might well be empty)
+        metadata = metadata.copyBuilder().
+                userData(myPropertyMap).build();
         store.setSummaryMetadata(metadata);
         
+        double storeCreationTime = System.currentTimeMillis() - storeStartTime;
         runnableLogger.info(String.format("Datastore creation time: %.2f ms", 
-                (double)(System.currentTimeMillis() - storeStartTime)));
+                storeCreationTime));
         return store;
     }
     
+    /** Loop to grab frames from a camera that is being hardware triggered */
     protected Datastore acquireTriggeredDataset(
             Datastore store, int nFramesTotal) 
             throws Exception {
@@ -451,6 +464,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
         boolean grabbed = false;
         int nFrames = 0;
         double frameTimeTotal = 0;
+        int frameTimeout = timeOutMs; 
         
         double magnification = 20.0*1.406*(200.0/180.0);
         double pxSizeUm = 6.5/magnification;
@@ -464,7 +478,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 grabbed = false;
                 while(toc-tic < timeOutMs && !grabbed){
                     if (core_.getRemainingImageCount() > 0){
-                        // LITERAL REPO TaggedImage LOOP RESTORED
+                        // TaggedImage LOOP RESTORED
                         TaggedImage img = core_.popNextTaggedImage();	
                         Image tmp = mm_.data().convertTaggedImage(img);  
                         Image cbImg = tmp.copyWith(cb.p(nFrames).build(), md.build());
