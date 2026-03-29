@@ -701,8 +701,8 @@
             <Property name="model" type="javax.swing.ComboBoxModel" editor="org.netbeans.modules.form.editors2.ComboBoxModelEditor">
               <StringArray count="3">
                 <StringItem index="0" value="External trigger (global reset)"/>
-                <StringItem index="1" value="External trigger (global exposure with rolling)"/>
-                <StringItem index="2" value="Untriggered"/>
+                <StringItem index="1" value="External trigger (synchronous readout)"/>
+                <StringItem index="2" value="Untriggered (start trigger + internal clock)"/>
               </StringArray>
             </Property>
           </Properties>

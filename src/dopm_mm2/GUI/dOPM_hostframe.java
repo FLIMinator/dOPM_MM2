@@ -87,7 +87,7 @@ public class dOPM_hostframe extends javax.swing.JFrame {
         
         makeDirsAndLog();
         
-        saveImgToDisk = false;
+        saveImgToDisk = true;
         
         String defaultBasedir = new File(
                 System.getenv("USERPROFILE"), "dopmData").getAbsolutePath();
@@ -592,7 +592,7 @@ public class dOPM_hostframe extends javax.swing.JFrame {
 
         triggerModeLabel.setText("Trigger mode");
 
-        triggerModeComboBox.setModel(new javax.swing.DefaultComboBoxModel<>(new String[] { "External trigger (global reset)", "External trigger (global exposure with rolling)", "Untriggered" }));
+        triggerModeComboBox.setModel(new javax.swing.DefaultComboBoxModel<>(new String[] { "External trigger (global reset)", "External trigger (synchronous readout)", "Untriggered (start trigger + internal clock)" }));
         triggerModeComboBox.addActionListener(new java.awt.event.ActionListener() {
             public void actionPerformed(java.awt.event.ActionEvent evt) {
                 triggerModeComboBoxActionPerformed(evt);

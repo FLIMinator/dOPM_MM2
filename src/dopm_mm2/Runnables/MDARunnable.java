@@ -118,6 +118,7 @@ public class MDARunnable implements Runnable {
     
     @Override
     public void run(){
+        long mdaRunTic = System.currentTimeMillis();
         if (snapRunnable != null){
             // Set up timestamp and save dirs
             LocalDateTime date = LocalDateTime.now(); // Create a date object
@@ -135,7 +136,10 @@ public class MDARunnable implements Runnable {
             snapRunnable.dataOutDir = new File(
                     dataOutRootDir, saveDirName).getAbsolutePath();
 
+            long logFileTic = System.currentTimeMillis();
             createLogFile(snapRunnable.dataOutDir);  // save mdaRunnableLogger to file
+            mdaRunnableLogger.info(String.format("TIMING | MDARunnable | createLogFile | %d ms",
+                    System.currentTimeMillis() - logFileTic));
             
             // info
             String mdaInfo =
@@ -156,22 +160,34 @@ public class MDARunnable implements Runnable {
             
                                                 
             try {
+                long clearAttachTic = System.currentTimeMillis();
                 acq_.clearRunnables();
                 acq_.attachRunnable(-1, -1, -1, -1, snapRunnable);
+                mdaRunnableLogger.info(String.format("TIMING | MDARunnable | clear+attachRunnable | %d ms",
+                        System.currentTimeMillis() - clearAttachTic));
                 
                 // we dont use this 
                 // Datastore snapStore = acq_.runAcquisitionNonblocking();
                 // not sure what blocking helps with really, we dont need the
                 // snap datastore desperately
+                long runAcqTic = System.currentTimeMillis();
                 Datastore snapStore = acq_.runAcquisition();
+                mdaRunnableLogger.info(String.format("TIMING | MDARunnable | runAcquisition | %d ms",
+                        System.currentTimeMillis() - runAcqTic));
 
                 // SummaryMetadata snapMetadata = snapStore.getSummaryMetadata();
                 // mdaRunnableLogger.info("snap metadata:" + snapMetadata.toString());
 
                 mdaRunnableLogger.info("Running " + snapRunnable.getClass().getName());
+                long clearEndTic = System.currentTimeMillis();
                 acq_.clearRunnables();  // remove runnable
+                mdaRunnableLogger.info(String.format("TIMING | MDARunnable | clearRunnablesAfterRun | %d ms",
+                        System.currentTimeMillis() - clearEndTic));
 
+                long blankingOffTic = System.currentTimeMillis();
                 core_.setProperty(deviceSettings.getLaserBlankingDOport(), "Blanking", "On");
+                mdaRunnableLogger.info(String.format("TIMING | MDARunnable | finalBlankingOff | %d ms",
+                        System.currentTimeMillis() - blankingOffTic));
                 
                 /* TODO: implement 
                 if (snapRunnable.acquisitionFailed){
@@ -184,6 +200,9 @@ public class MDARunnable implements Runnable {
             } catch (Exception e){  // look into using micromanager exceptions
                 mdaRunnableLogger.severe("Failed in volume acquisition:" + 
                         e.getMessage());
+            } finally {
+                mdaRunnableLogger.info(String.format("TIMING | MDARunnable | totalRun | %d ms",
+                        System.currentTimeMillis() - mdaRunTic));
             }
         } else {
             mdaRunnableLogger.severe("Runnable is null; wasn't successfully "
