@@ -19,28 +19,34 @@ import org.micromanager.display.DisplayWindow;
 /**
  * PI mirror-scan runnable using the shared AbstractAcquisitionRunnable workflow.
  *
- * <p>This class supplies only the PI-specific single-view scan behaviour.
- * The parent class, {@code AbstractAcquisitionRunnable}, owns:
- * <ul>
- *   <li>camera trigger-mode setup</li>
- *   <li>view 1 / view 2 switching</li>
- *   <li>first-channel storage of stage start positions</li>
- *   <li>last-channel reset of stage positions</li>
- *   <li>final camera trigger cleanup</li>
- * </ul>
+ * Key design points:
  *
- * <p>Current supported PI trigger modes:
- * <ul>
- *   <li>Mode 0: external global reset</li>
- *   <li>Mode 1: external synchronous readout</li>
- * </ul>
+ * 1. Tango XY always defines the sample/FOV position.
  *
- * <p>Mode 2, start trigger + internal camera clock, is intentionally rejected
- * for now. The current PI trigger implementation emits repeated position
- * triggers. Mode 2 requires one clean start trigger followed by an internally
- * clocked camera burst.
+ * 2. The PI mirror has view-specific centre positions. The parent class calls
+ *    currentAcq.setCurrentView(1/2) before runSingleView(...), so this class
+ *    reads the current PI mirror position inside runSingleView(...) and scans
+ *    relative to that view-specific value.
  *
- * @author OPMuser
+ * 3. PI trigger geometry is cached. If the trigger start, end, and distance are
+ *    unchanged between channels, the expensive PI serial trigger reconfiguration
+ *    is skipped.
+ *
+ * 4. Sync-readout mode is handled separately from global-reset mode:
+ *
+ *      Global reset:
+ *          one useful trigger event per acquired image
+ *
+ *      Sync readout:
+ *          trigger events are frame boundaries
+ *          N image planes require N + 1 trigger events
+ *
+ * Supported trigger modes:
+ *   Mode 0: external global reset
+ *   Mode 1: external synchronous readout
+ *
+ * Mode 2 is intentionally rejected for PI mirror scanning until a true
+ * single-start-trigger PI implementation is added.
  */
 public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
 
@@ -52,18 +58,25 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
     /** Fixed mirror travel margin after the trigger range ends. */
     private static final double SCAN_OVERSHOOT_UM = 10.0;
 
+    /**
+     * Tolerance for deciding whether cached PI trigger geometry is still valid.
+     *
+     * Units are mm because PI trigger range/distance are sent to the controller
+     * in mm.
+     */
+    private static final double PI_TRIGGER_CACHE_TOL_MM = 1e-5;
+
+    /** Cached PI trigger geometry from the previous runSingleView call. */
+    private Double lastTriggerStartMillim = null;
+    private Double lastTriggerEndMillim = null;
+    private Double lastTriggerDistanceMillim = null;
+
     public PIScanRunnableInherited(dOPM_hostframe frame_ref,
             MDAProgressManager acqProgressMgr) {
         super(frame_ref, acqProgressMgr);
         PIDeviceID = 1;
     }
 
-    /**
-     * PI-specific timing log helper.
-     *
-     * @param label timing label
-     * @param ticMs start time from {@code tic()}
-     */
     private void logPIScanTiming(String label, long ticMs) {
         runnableLogger.info(String.format(
                 "TIMING | PIScan | %s | %d ms",
@@ -72,20 +85,58 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
     }
 
     /**
-     * Acquire one dOPM view using PI mirror scanning.
-     *
-     * <p>The parent class calls this once for each enabled view.
-     *
-     * @param opmAngle current OPM view angle
-     * @throws Exception if acquisition, triggering, or saving fails
+     * Return true if the requested PI trigger geometry differs from the cached
+     * controller geometry.
      */
+    private boolean shouldConfigurePITrigger(
+            double triggerStartMillim,
+            double triggerEndMillim,
+            double triggerDistanceMillim) {
+
+        if (lastTriggerStartMillim == null
+                || lastTriggerEndMillim == null
+                || lastTriggerDistanceMillim == null) {
+            return true;
+        }
+
+        return Math.abs(lastTriggerStartMillim - triggerStartMillim)
+                    > PI_TRIGGER_CACHE_TOL_MM
+                || Math.abs(lastTriggerEndMillim - triggerEndMillim)
+                    > PI_TRIGGER_CACHE_TOL_MM
+                || Math.abs(lastTriggerDistanceMillim - triggerDistanceMillim)
+                    > PI_TRIGGER_CACHE_TOL_MM;
+    }
+
+    /**
+     * Store the latest PI trigger geometry after successful configuration.
+     */
+    private void cachePITriggerGeometry(
+            double triggerStartMillim,
+            double triggerEndMillim,
+            double triggerDistanceMillim) {
+
+        lastTriggerStartMillim = triggerStartMillim;
+        lastTriggerEndMillim = triggerEndMillim;
+        lastTriggerDistanceMillim = triggerDistanceMillim;
+    }
+
+    /**
+     * Clear cached trigger geometry after an error or if we cannot trust the
+     * controller state.
+     */
+    private void invalidatePITriggerCache() {
+        lastTriggerStartMillim = null;
+        lastTriggerEndMillim = null;
+        lastTriggerDistanceMillim = null;
+    }
+
     @Override
     public void runSingleView(double opmAngle) throws Exception {
 
         long runSingleViewTic = tic();
 
         // ---------------------------------------------------------------------
-        // Validate trigger mode
+        // Validate camera trigger mode
         // ---------------------------------------------------------------------
 
         final int triggerMode = deviceSettings.getTriggerMode();
@@ -113,7 +164,7 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                     deviceSettings.getTriggerModeLabel()));
         }
 
-        DisplayWindow display = null;  // Only used if saving to RAM/display.
+        DisplayWindow display = null;
 
         // ---------------------------------------------------------------------
         // Read scan settings
@@ -134,49 +185,94 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                     "Mirror scan length must be > 0");
         }
 
+        // ---------------------------------------------------------------------
+        // Critical PI-view-relative scan centre
+        // ---------------------------------------------------------------------
+
+        /*
+         * The parent class has already called currentAcq.setCurrentView(1/2)
+         * before entering this method.
+         *
+         * For PI mirror scanning, the dOPM view preset can move the PI mirror to
+         * a view-specific centre. Therefore, the scan must be centred on the
+         * CURRENT mirror position after the view has been set, not on the
+         * pre-view stored mirror position.
+         */
+        final double viewMirrorCenterUm = core_.getPosition(mirrorStage);
+
         runnableLogger.info(String.format(
-                "PI mirror scan | mode=%s | targetLength=%.3f um | triggerDistance=%.5f um | scanSpeed=%.6f mm/s | startingMirror=%.5f um | viewAngle=%.3f",
+                "PI mirror scan | mode=%s | currentView=%d | storedMirrorStart=%.5f um | viewMirrorCenter=%.5f um | targetLength=%.3f um | triggerDistance=%.5f um | scanSpeed=%.6f mm/s | viewAngle=%.3f",
                 deviceSettings.getTriggerModeLabel(),
+                currentAcq != null ? currentAcq.getCurrentView() : -1,
+                startingMirrorPositionUm,
+                viewMirrorCenterUm,
                 scanLengthUm,
                 triggerDistanceUm,
                 scanSpeed,
-                startingMirrorPositionUm,
                 opmAngle));
 
         // ---------------------------------------------------------------------
-        // Derive scan geometry
+        // Derive scan geometry around the view-specific mirror centre
         // ---------------------------------------------------------------------
 
         /*
-         * The parent class stores startingMirrorPositionUm only on the first
-         * channel at a given MDA point. It resets to this position only after
-         * the last channel.
+         * nFrames is the number of images to acquire.
          *
-         * That means intermediate channels do not return to the scan centre.
-         * They still move back to scanStartUm before each scan.
+         * Keep this as the number of plane intervals in the requested scan
+         * length. The trigger-event count may differ by mode.
          */
+        final int nFrames =
+                Math.max(1, (int) Math.floor(scanLengthUm / triggerDistanceUm));
+
         final double triggerScanStartUm =
-                startingMirrorPositionUm - scanLengthUm / 2.0;
+                viewMirrorCenterUm - scanLengthUm / 2.0;
 
         final double targetTriggerScanEndUm =
-                startingMirrorPositionUm + scanLengthUm / 2.0;
+                viewMirrorCenterUm + scanLengthUm / 2.0;
 
         /*
-         * Keep the existing PI behaviour: actual trigger endpoint is rounded down
-         * so the triggered scan contains an integer number of trigger intervals.
+         * Isolated sync-readout fix:
+         *
+         * In synchronous readout, trigger events are frame boundaries.
+         * N frames require N + 1 trigger events.
+         *
+         * Assuming the PI emits triggers at:
+         *
+         *      start, start + d, ..., end
+         *
+         * then a trigger range of length N*d gives N + 1 trigger boundary
+         * events and therefore N acquired frame intervals.
+         *
+         * In global-reset mode, preserve the existing PI behaviour as closely
+         * as possible, because that path has already been shown to work after
+         * slowing the scan speed.
          */
-        final double triggerScanEndUm =
-                triggerScanStartUm
-                + triggerDistanceUm * Math.floor(
-                        (targetTriggerScanEndUm - triggerScanStartUm)
-                        / triggerDistanceUm);
+        final int requiredTriggerEvents;
+        final double triggerScanEndUm;
+
+        if (syncReadoutMode) {
+            requiredTriggerEvents = nFrames + 1;
+
+            triggerScanEndUm =
+                    triggerScanStartUm + triggerDistanceUm * nFrames;
+
+        } else {
+            requiredTriggerEvents = nFrames;
+
+            /*
+             * Existing global-reset PI behaviour:
+             * round the actual trigger end down to an integer number of
+             * trigger-distance intervals within the requested target range.
+             */
+            triggerScanEndUm =
+                    triggerScanStartUm
+                    + triggerDistanceUm * Math.floor(
+                            (targetTriggerScanEndUm - triggerScanStartUm)
+                            / triggerDistanceUm);
+        }
 
         final double acquiredScanLengthUm =
-                triggerScanEndUm - triggerScanStartUm;
-
-        final int nFrames =
-                Math.max(1, (int) Math.floor(
-                        acquiredScanLengthUm / triggerDistanceUm));
+                nFrames * triggerDistanceUm;
 
         final double scanStartUm =
                 triggerScanStartUm - SCAN_UNDERSHOOT_UM;
@@ -191,69 +287,98 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                 1.0 / (triggerDistanceMillim / scanSpeed);
 
         runnableLogger.info(String.format(
-                "PI mirror geometry | triggerStart=%.5f um | targetTriggerEnd=%.5f um | actualTriggerEnd=%.5f um | acquiredLength=%.5f um | scanStart=%.5f um | scanEnd=%.5f um | nFrames=%d | effectiveFPS=%.3f",
+                "PI trigger/frame convention | mode=%s | currentView=%d | nFrames=%d | requiredTriggerEvents=%d | triggerDistance=%.5f um | triggerStart=%.5f um | targetTriggerEnd=%.5f um | actualTriggerEnd=%.5f um | scanStart=%.5f um | scanEnd=%.5f um | effectiveFPS=%.3f",
+                deviceSettings.getTriggerModeLabel(),
+                currentAcq != null ? currentAcq.getCurrentView() : -1,
+                nFrames,
+                requiredTriggerEvents,
+                triggerDistanceUm,
                 triggerScanStartUm,
                 targetTriggerScanEndUm,
                 triggerScanEndUm,
-                acquiredScanLengthUm,
                 scanStartUm,
                 scanEndUm,
-                nFrames,
                 effectiveFPS));
 
         // ---------------------------------------------------------------------
-        // Configure PI trigger output
+        // Configure PI trigger output only if geometry changed
         // ---------------------------------------------------------------------
 
         long triggerSetupTic = tic();
 
-        try {
-            /*
-             * Basic PI trigger setup:
-             * - clear stale serial replies
-             * - disable trigger
-             * - digital output low
-             * - trigger axis = 1
-             * - trigger mode = position/distance trigger
-             */
-            PIStage.setupPITriggering(mirrorStagePort, PIDeviceID);
-
-            /*
-             * STP is retained from the original working PI implementation.
-             * It appears to help the PI controller accept trigger configuration
-             * reliably before a scan.
-             */
-            PIStage.stopPIStage(mirrorStagePort);
-
-            PIStage.setPITriggerDistance(
-                    mirrorStagePort,
-                    PIDeviceID,
-                    triggerDistanceMillim);
-
-            PIStage.setPITriggerRange(
-                    mirrorStagePort,
-                    PIDeviceID,
-                    new double[]{
+        final boolean configurePITrigger =
+                shouldConfigurePITrigger(
                         triggerScanStartMillim,
-                        triggerScanEndMillim
-                    });
+                        triggerScanEndMillim,
+                        triggerDistanceMillim);
 
-        } catch (Exception e) {
-            runnableLogger.severe(
-                    "Failed during PI trigger setup: " + e.getMessage());
-            throw e;
-        }
+        if (configurePITrigger) {
+            try {
+                runnableLogger.info(String.format(
+                        "Configuring PI trigger geometry | start=%.5f mm | end=%.5f mm | dist=%.5f mm | requiredTriggerEvents=%d",
+                        triggerScanStartMillim,
+                        triggerScanEndMillim,
+                        triggerDistanceMillim,
+                        requiredTriggerEvents));
 
-        logPIScanTiming("triggerSetupTotal", triggerSetupTic);
+                /*
+                 * Conservative full setup path. It runs when geometry changes,
+                 * for example between View 1 and View 2, or between MDA
+                 * positions where the view mirror centre differs.
+                 */
+                PIStage.setupPITriggering(mirrorStagePort, PIDeviceID);
 
-        try {
-            String[] piSettings = PIStage.viewTriggerSettings(mirrorStagePort);
-            runnableLogger.info("PI trigger settings after setup: "
-                    + String.join(" | ", piSettings));
-        } catch (Exception e) {
-            runnableLogger.warning(
-                    "Could not log PI trigger settings after setup: "
-                    + e.getMessage());
+                /*
+                 * Retained from the original working PI implementation.
+                 */
+                PIStage.stopPIStage(mirrorStagePort);
+
+                PIStage.setPITriggerDistance(
+                        mirrorStagePort,
+                        PIDeviceID,
+                        triggerDistanceMillim);
+
+                PIStage.setPITriggerRange(
+                        mirrorStagePort,
+                        PIDeviceID,
+                        new double[]{
+                            triggerScanStartMillim,
+                            triggerScanEndMillim
+                        });
+
+                cachePITriggerGeometry(
+                        triggerScanStartMillim,
+                        triggerScanEndMillim,
+                        triggerDistanceMillim);
+
+            } catch (Exception e) {
+                invalidatePITriggerCache();
+                runnableLogger.severe(
+                        "Failed during PI trigger setup: " + e.getMessage());
+                throw e;
+            }
+
+            logPIScanTiming("triggerSetupTotalConfigured", triggerSetupTic);
+
+            try {
+                String[] piSettings = PIStage.viewTriggerSettings(mirrorStagePort);
+                runnableLogger.info("PI trigger settings after setup: "
+                        + String.join(" | ", piSettings));
+            } catch (Exception e) {
+                runnableLogger.warning(
+                        "Could not log PI trigger settings after setup: "
+                        + e.getMessage());
+            }
+
+        } else {
+            runnableLogger.info(String.format(
+                    "Skipping PI trigger reconfiguration; geometry unchanged | start=%.5f mm | end=%.5f mm | dist=%.5f mm | requiredTriggerEvents=%d",
+                    triggerScanStartMillim,
+                    triggerScanEndMillim,
+                    triggerDistanceMillim,
+                    requiredTriggerEvents));
+
+            logPIScanTiming("triggerSetupTotalSkipped", triggerSetupTic);
         }
 
         // ---------------------------------------------------------------------
@@ -264,9 +389,11 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
 
         try {
             /*
-             * Move to the undershoot position at travel speed, not scan speed.
-             * The parent class does not reset to centre between channels; this
-             * move simply returns the mirror to the start side of the scan.
+             * Move to the undershoot position at travel speed.
+             *
+             * This does not reset to the acquisition centre. It only moves from
+             * the current/end position back to the scan-start side for this
+             * view-specific relative scan.
              */
             core_.setProperty(
                     mirrorStage,
@@ -301,9 +428,14 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                         .putString("mode", globalResetMode
                                 ? "ExternalGlobalReset"
                                 : "ExternalSyncReadout")
+                        .putInteger("currentView",
+                                currentAcq != null ? currentAcq.getCurrentView() : -1)
+                        .putDouble("stored mirror start um", startingMirrorPositionUm)
+                        .putDouble("view mirror center um", viewMirrorCenterUm)
                         .putDouble("trigger distance um", triggerDistanceUm)
                         .putDouble("trigger distance mm", triggerDistanceMillim)
-                        .putDouble("scan length um", acquiredScanLengthUm)
+                        .putDouble("requested scan length um", scanLengthUm)
+                        .putDouble("acquired scan length um", acquiredScanLengthUm)
                         .putDouble("scan start um", scanStartUm)
                         .putDouble("scan end um", scanEndUm)
                         .putDouble("trigger scan start um", triggerScanStartUm)
@@ -311,12 +443,13 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                         .putDouble("target trigger scan end um", targetTriggerScanEndUm)
                         .putDouble("scan speed mm/s", scanSpeed)
                         .putInteger("nFrames", nFrames)
+                        .putInteger("required trigger events", requiredTriggerEvents)
+                        .putBoolean("pi trigger reconfigured", configurePITrigger)
                         .build();
 
                 /*
                  * d' in the literature: plane spacing in mirror-normal
-                 * coordinates, derived from the lateral mirror scan trigger
-                 * distance.
+                 * coordinates.
                  */
                 double zprimeSpacing =
                         deviceSettings.lateralScanToMirrorNormal(
@@ -355,10 +488,6 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
         core_.startSequenceAcquisition(camName, nFrames, 0, true);
         logPIScanTiming("startSequenceAcquisition", seqStartTic);
 
-        /*
-         * Defensive wait until the camera reports that sequence acquisition is
-         * running. This mirrors the Tango scan path.
-         */
         long seqReadyTic = tic();
         int readyCheck = 0;
 
@@ -370,20 +499,27 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
         logPIScanTiming("waitForSequenceRunning", seqReadyTic);
 
         // ---------------------------------------------------------------------
-        // Execute scan and collect triggered frames
+        // Execute scan and collect frames
         // ---------------------------------------------------------------------
 
         try {
+            /*
+             * Even when trigger geometry is cached, trigger output must still be
+             * enabled for each scan and disabled in finally.
+             */
             long trigEnableTic = tic();
             PIStage.setPITriggerEnable(mirrorStagePort, PIDeviceID, 1);
             logPIScanTiming("setPITriggerEnableOn", trigEnableTic);
 
             if (syncReadoutMode) {
                 /*
-                 * Match the Tango sync-readout pathway:
-                 * - parent setupCameraTriggering() leaves camera output low
-                 * - here we explicitly unblank before the scan window
-                 * - finally block restores blanking afterwards
+                 * Sync-readout mode:
+                 * The trigger events are the frame boundaries. We therefore
+                 * opened the PI trigger range above to provide N + 1 trigger
+                 * events for N images.
+                 *
+                 * Match the Tango sync-readout pathway by explicitly unblanking
+                 * just before the scan.
                  */
                 long blankingTic = tic();
                 core_.setProperty(DAQDOPort, "Blank on", "Low");
@@ -393,11 +529,12 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                 long settleTic = tic();
                 Thread.sleep(100);
                 logPIScanTiming("syncReadoutGateSettleDelay", settleTic);
+
             } else if (globalResetMode) {
                 /*
-                 * Preserve the original global-reset behaviour. In this mode,
-                 * the camera exposure output can be used as the gating signal,
-                 * so blanking is enabled before the triggered sequence.
+                 * Global-reset mode:
+                 * Preserve existing behaviour. Camera exposure output gates
+                 * illumination while PI provides one useful trigger per plane.
                  */
                 long blankingTic = tic();
                 core_.setProperty(DAQDOPort, "Blanking", "On");
@@ -410,13 +547,16 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
             logPIScanTiming("setScanSpeed", speedTic);
 
             runnableLogger.info(String.format(
-                    "Starting PI mirror scan | mode=%s | start=%.5f um | triggerStart=%.5f um | triggerEnd=%.5f um | end=%.5f um | frames=%d | speed=%.6f mm/s",
+                    "Starting PI mirror scan | mode=%s | currentView=%d | viewCenter=%.5f um | start=%.5f um | triggerStart=%.5f um | triggerEnd=%.5f um | end=%.5f um | frames=%d | triggerEvents=%d | speed=%.6f mm/s",
                     deviceSettings.getTriggerModeLabel(),
+                    currentAcq != null ? currentAcq.getCurrentView() : -1,
+                    viewMirrorCenterUm,
                     scanStartUm,
                     triggerScanStartUm,
                     triggerScanEndUm,
                     scanEndUm,
                     nFrames,
+                    requiredTriggerEvents,
                     scanSpeed));
 
             long moveScanTic = tic();
@@ -432,11 +572,6 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
             logPIScanTiming("waitForMirrorAfterAcquisition", waitStageDoneTic);
 
         } catch (TimeoutException e) {
-            /*
-             * If frame acquisition times out, query the actual mirror position.
-             * This helps distinguish camera-trigger failure from stage-motion
-             * failure.
-             */
             try {
                 core_.setSerialPortCommand(mirrorStagePort, "POS? 1", "\n");
                 runnableLogger.info(
@@ -448,6 +583,13 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
             throw e;
 
         } catch (Exception e) {
+            /*
+             * If acquisition fails, invalidate cached trigger geometry. The next
+             * scan should fully reconfigure PI trigger settings rather than
+             * trusting controller state.
+             */
+            invalidatePITriggerCache();
+
             throw new Exception(
                     "PI mirror triggered acquisition failed: "
                     + e.getMessage());
@@ -480,6 +622,8 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                 logPIScanTiming("setPITriggerEnableOff", trigOffTic);
 
             } catch (Exception e) {
+                invalidatePITriggerCache();
+
                 runnableLogger.warning(
                         "Failed to disable PI triggering: "
                         + e.getMessage());
@@ -491,17 +635,14 @@ public class PIScanRunnableInherited extends AbstractAcquisitionRunnable {
                 logPIScanTiming("setPIDigitalOutLow", dioLowTic);
 
             } catch (Exception e) {
+                invalidatePITriggerCache();
+
                 runnableLogger.warning(
                         "Failed to set PI digital output low: "
                         + e.getMessage());
             }
 
             try {
-                /*
-                 * Return laser blanking to the safe state after every view.
-                 * The parent cleanup also calls switchOffLasers(), so this is
-                 * deliberately redundant for safety.
-                 */
                 long blankingTic = tic();
                 core_.setProperty(DAQDOPort, "Blank on", "Low");
                 core_.setProperty(DAQDOPort, "Blanking", "On");
