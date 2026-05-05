@@ -30,25 +30,28 @@ import org.micromanager.data.SummaryMetadata;
 import dopm_mm2.acquisition.MDAProgressManager;
 import dopm_mm2.util.dialogBoxes;
 
-/** Abstract class for dOPM runnables, switching between views and calling
+/**
+ * Abstract class for dOPM runnables, switching between views and calling
  * runSingleView for each view.
+ *
  * When writing a new dOPM runnable that extends this abstract class,
- * runSingleView is overloaded and you shouldn't need to do anything
- * with run itself
- * * @author Leo Rowe-Brown
+ * runSingleView is overloaded and you should not need to do anything
+ * with run itself.
+ *
+ * @author Leo Rowe-Brown
  */
 public abstract class AbstractAcquisitionRunnable implements Runnable {
-    
+
     protected final dOPM_hostframe frame_;
     protected final CMMCore core_;
     protected final Studio mm_;
     protected final DeviceSettingsManager deviceSettings;
     protected final MDAProgressManager currentAcq;
     protected double currentViewAngle;
-    
+
     protected String settingsOutDir;
     protected String dataOutDir;
-    
+
     protected boolean errorWindowsDuringAcq;
 
     protected final String camName;
@@ -61,103 +64,120 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
     protected List<String> lasers;
     protected StagePosition stagePosition;
     protected PositionList positionList;
-    
+
     protected final String XYStagePort;
     protected final String mirrorStagePort;
     protected final String DAQDOPort;
-    
-    // starting stage positions:
+
+    // starting stage positions
     protected double startingXPositionUm;
     protected double startingYPositionUm;
     protected double startingZpositionUm;
     protected double startingMirrorPositionUm;
     protected double zStepUm;
-    
-    protected double volumeScanLength;
-    
-    protected int maxDroppedFrames;
-    protected boolean acquisitionFailed;  // sets true if acq gets error
-    
-    protected long endClockTimeMs;  // for estimating MDA's snap and overhead duration
 
-    
-    // Use the "MDA" logger 
-    protected static final Logger runnableLogger = 
-        Logger.getLogger(MDARunnable.class.getName());
-    
+    protected double volumeScanLength;
+
+    protected int maxDroppedFrames;
+    protected boolean acquisitionFailed;
+
+    protected long endClockTimeMs;
+
+    // Use the "MDA" logger
+    protected static final Logger runnableLogger =
+            Logger.getLogger(MDARunnable.class.getName());
+
     /** Timing helpers for profiling where acquisition overhead accumulates. */
-    protected long tic() { return System.currentTimeMillis(); }
+    protected long tic() {
+        return System.currentTimeMillis();
+    }
 
     protected void logTiming(String label, long ticMs) {
-        runnableLogger.info(String.format("TIMING | %s | %d ms", label,
+        runnableLogger.info(String.format(
+                "TIMING | %s | %d ms",
+                label,
                 System.currentTimeMillis() - ticMs));
     }
 
     protected void logTiming(String scope, String label, long ticMs) {
-        runnableLogger.info(String.format("TIMING | %s | %s | %d ms", scope,
-                label, System.currentTimeMillis() - ticMs));
+        runnableLogger.info(String.format(
+                "TIMING | %s | %s | %d ms",
+                scope,
+                label,
+                System.currentTimeMillis() - ticMs));
     }
 
-    public AbstractAcquisitionRunnable(dOPM_hostframe frame_ref, 
+    public AbstractAcquisitionRunnable(
+            dOPM_hostframe frame_ref,
             MDAProgressManager acqProgressMgr) {
-        frame_ = frame_ref;  // consider changing dependency to just deviceSettings
+
+        frame_ = frame_ref;
         mm_ = dOPM_hostframe.mm_;
         core_ = mm_.getCMMCore();
         deviceSettings = frame_.getDeviceSettings();
         currentAcq = acqProgressMgr;
-        
+
         errorWindowsDuringAcq = true;
         maxDroppedFrames = 0;
-        
-        // device variables
+        acquisitionFailed = false;
+
         camName = deviceSettings.getdOPMCameraName();
         mirrorStage = deviceSettings.getMirrorStageName();
         XYStage = deviceSettings.getXyStageName();
         ZStage = deviceSettings.getZStageName();
         filterWheel = deviceSettings.getFilterDeviceName();
         DAQDOPort = deviceSettings.getLaserBlankingDOport();
-        
-        runnableLogger.info(String.format("Variables: camera: %s, mirror stage: %s, xy stage: %s, z stage: %s, filter wheel: %s, DAQ DO port: %s",
-                camName, mirrorStage, XYStage, ZStage, filterWheel, DAQDOPort));   
-        
+
+        runnableLogger.info(String.format(
+                "Variables: camera: %s, mirror stage: %s, xy stage: %s, z stage: %s, filter wheel: %s, DAQ DO port: %s",
+                camName,
+                mirrorStage,
+                XYStage,
+                ZStage,
+                filterWheel,
+                DAQDOPort));
+
         XYStagePort = deviceSettings.getXyStageComPort();
         mirrorStagePort = deviceSettings.getMirrorStageComPort();
-        
+
         endClockTimeMs = 0;
     }
-    
+
     @Override
-    public void run(){
+    public void run() {
+        acquisitionFailed = false;
+
         runnableLogger.info("In runnable's run()");
-        if (endClockTimeMs != 0){
+
+        if (endClockTimeMs != 0) {
             runnableLogger.info(String.format(
                     "MDA's snap and overheads added %d ms to acq",
-                    System.currentTimeMillis()-endClockTimeMs));
+                    System.currentTimeMillis() - endClockTimeMs));
         }
-        long waitForSystemTic = tic();
+
+        long start = System.currentTimeMillis();
+
         try {
-            // wait until stage has reached position in position list
+            long waitForSystemTic = tic();
             core_.waitForSystem();
             logTiming("run", "waitForSystem", waitForSystemTic);
-        } catch (Exception e){
-            String msg = "Failed to wait for devices before "
-                    + "acquisition with " + e.toString();
+
+        } catch (Exception e) {
+            String msg = "Failed to wait for devices before acquisition with " + e;
             runnableLogger.severe(msg);
             logErrorWithWindow(e);
-            // Thread.sleep(10000);
+            acquisitionFailed = true;
+            return;
         }
-        long start = System.currentTimeMillis();           
-        
-        // Set scan speed variables accordingly for mirror and xystage
+
         long speedUpdateTic = tic();
         deviceSettings.updateCurrentScanSpeedsDuringAcq();
         logTiming("run", "updateCurrentScanSpeedsDuringAcq", speedUpdateTic);
 
         final boolean storeStageStartThisRun = shouldStoreStageStartingPositionsThisRun();
         final boolean resetStageAtEndThisRun = shouldResetStagePositionsThisRun();
-                
+
         try {
-            // Setup Camera Triggering using provided logic
             long setupCameraTic = tic();
             setupCameraTriggering();
             logTiming("run", "setupCameraTriggering", setupCameraTic);
@@ -178,26 +198,39 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                         currentAcq != null ? currentAcq.getnChannelPts() : -1));
             }
 
-            runnableLogger.info(String.format("Runnable setup inside run took %d ms", 
-                    System.currentTimeMillis()-start));
+            runnableLogger.info(String.format(
+                    "Runnable setup inside run took %d ms",
+                    System.currentTimeMillis() - start));
 
+            // ------------------------------------------------------------------
             // View 1
-            if (deviceSettings.isView1Imaged()){
+            // ------------------------------------------------------------------
+            if (deviceSettings.isView1Imaged()) {
                 runnableLogger.info("Acquiring view 1");
-                try { 
+
+                try {
                     currentAcq.setCurrentView(1);
-                } catch (Exception e){
+                } catch (Exception e) {
                     runnableLogger.severe("Failed to change to view 1");
+                    logErrorWithWindow(e);
+                    acquisitionFailed = true;
                     return;
                 }
+
                 currentViewAngle = -deviceSettings.getOpmAngle();
                 long view1TotalTic = tic();
+
                 try {
                     long runSingleViewTic = tic();
                     runSingleView(currentViewAngle);
                     logTiming("view1", "runSingleView", runSingleViewTic);
-                } catch (Exception e){
+
+                } catch (Exception e) {
                     logErrorWithWindow(e);
+                    acquisitionFailed = true;
+                    runnableLogger.severe("Aborting MDA after view 1 acquisition failure.");
+                    return;
+
                 } finally {
                     long cleanupTic = tic();
                     cleanupAcq();
@@ -205,23 +238,41 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     logTiming("view1", "total", view1TotalTic);
                 }
             }
-            
+
+            if (acquisitionFailed) {
+                runnableLogger.severe("Aborting before view 2 because acquisitionFailed=true.");
+                return;
+            }
+
+            // ------------------------------------------------------------------
             // View 2
-            if (deviceSettings.isView2Imaged()){
+            // ------------------------------------------------------------------
+            if (deviceSettings.isView2Imaged()) {
                 runnableLogger.info("Acquiring view 2");
-                try { 
+
+                try {
                     currentAcq.setCurrentView(2);
-                } catch (Exception e){
+                } catch (Exception e) {
                     runnableLogger.severe("Failed to change to view 2");
+                    logErrorWithWindow(e);
+                    acquisitionFailed = true;
+                    return;
                 }
+
                 currentViewAngle = deviceSettings.getOpmAngle();
                 long view2TotalTic = tic();
+
                 try {
                     long runSingleViewTic = tic();
                     runSingleView(currentViewAngle);
                     logTiming("view2", "runSingleView", runSingleViewTic);
-                } catch (Exception e){
+
+                } catch (Exception e) {
                     logErrorWithWindow(e);
+                    acquisitionFailed = true;
+                    runnableLogger.severe("Aborting MDA after view 2 acquisition failure.");
+                    return;
+
                 } finally {
                     long cleanupTic = tic();
                     cleanupAcq();
@@ -229,8 +280,11 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     logTiming("view2", "total", view2TotalTic);
                 }
             }
+
         } catch (Exception hardwareEx) {
+            acquisitionFailed = true;
             logErrorWithWindow("Hardware setup logic fail: " + hardwareEx.getMessage());
+
         } finally {
             if (resetStageAtEndThisRun) {
                 long resetTic = tic();
@@ -243,23 +297,26 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                         currentAcq != null ? currentAcq.getnChannelPts() : -1));
             }
 
-            // VITAL SAFETY: Return camera to internal sync even if acquisition fails or is aborted
             try {
                 stopCameraTriggering();
-            } catch (Exception e){
+            } catch (Exception e) {
                 runnableLogger.severe("Critical tidy-up fail: " + e.getMessage());
             }
-            if (currentAcq!=null){
+
+            if (currentAcq != null && !acquisitionFailed) {
                 currentAcq.nextAcqPoint();
+            } else if (currentAcq != null && acquisitionFailed) {
+                runnableLogger.severe("Not advancing MDA index because acquisition failed.");
             }
         }
-        
+
         runnableLogger.info(String.format(
-                "Full acquisition took %d ms", 
-                System.currentTimeMillis()-start));
+                "Full acquisition took %d ms",
+                System.currentTimeMillis() - start));
+
         endClockTimeMs = System.currentTimeMillis();
     }
-    
+
     public abstract void runSingleView(double currentViewAngle) throws Exception;
 
     /**
@@ -285,82 +342,103 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 == currentAcq.getnChannelPts() - 1;
     }
 
-    
-    protected void logErrorWithWindow(Exception e){
+    protected void logErrorWithWindow(Exception e) {
         String msg = e.toString();
         logErrorWithWindow(msg);
     }
-    
-    protected void logErrorWithWindow(String msg){
+
+    protected void logErrorWithWindow(String msg) {
         runnableLogger.severe(msg);
-        mm_.acquisitions().abortAcquisition();
-        mm_.acquisitions().isAcquisitionRunning();
-        mm_.acquisitions().clearRunnables();
-        
+
+        try {
+            mm_.acquisitions().abortAcquisition();
+            mm_.acquisitions().isAcquisitionRunning();
+            mm_.acquisitions().clearRunnables();
+        } catch (Exception e) {
+            runnableLogger.warning("Could not abort/clear Micro-Manager acquisition: " + e.getMessage());
+        }
+
         acquisitionFailed = true;
-        if (errorWindowsDuringAcq) dialogBoxes.acquisitionErrorWindow(msg);
+
+        if (errorWindowsDuringAcq) {
+            dialogBoxes.acquisitionErrorWindow(msg);
+        }
     }
-    
-    protected void storeStageStartingPositions() throws Exception{
-        /** Store current positions of stage before acquisition. */
+
+    protected void storeStageStartingPositions() throws Exception {
         long tic_ = tic();
+
         try {
             startingXPositionUm = core_.getXPosition(XYStage);
             startingYPositionUm = core_.getYPosition(XYStage);
-            if (!ZStage.equals("")) startingZpositionUm = core_.getPosition(ZStage);
-            startingMirrorPositionUm = core_.getPosition(mirrorStage);  // um
+
+            if (!ZStage.equals("")) {
+                startingZpositionUm = core_.getPosition(ZStage);
+            }
+
+            startingMirrorPositionUm = core_.getPosition(mirrorStage);
+
             runnableLogger.info(String.format(
                     "STAGE START | x=%.3f um | y=%.3f um | z=%.3f um | mirror=%.3f um",
-                    startingXPositionUm, startingYPositionUm,
+                    startingXPositionUm,
+                    startingYPositionUm,
                     ZStage.equals("") ? Double.NaN : startingZpositionUm,
                     startingMirrorPositionUm));
+
             logTiming("storeStageStartingPositions", tic_);
-        } catch (Exception e){
+
+        } catch (Exception e) {
             runnableLogger.severe(String.format(
                     "Failed to get starting stage positions with %s",
                     e.getMessage()));
             throw e;
         }
     }
-    
-    protected void switchOffLasers(){
+
+    protected void switchOffLasers() {
         runnableLogger.info("lasers -> off");
+
         try {
-            // core_.setProperty(DAQDOPort, "State", 0);
-			core_.setProperty(DAQDOPort, "Blank on", "Low");
+            core_.setProperty(DAQDOPort, "Blank on", "Low");
             core_.setProperty(DAQDOPort, "Blanking", "On");
-        } catch (Exception e){
-            String err = "Failed to switch off lasers and blanking via DAQ: " 
-                    + e.toString();
+
+        } catch (Exception e) {
+            String err = "Failed to switch off lasers and blanking via DAQ: " + e;
             runnableLogger.severe(err);
             logErrorWithWindow(err);
         }
     }
-    
-    protected void cleanupAcq(){
+
+    protected void cleanupAcq() {
         long start = System.currentTimeMillis();
+
         try {
-            // Keep outer cleanup lightweight. Individual scan runnables already own
-            // their per-scan sequence stop and datastore finalization.
             if (core_.isSequenceRunning()) {
                 core_.stopSequenceAcquisition();
             }
-			switchOffLasers();
-        } catch (Exception e){
-            logErrorWithWindow("Issue in stopping sequence " + e.toString());
+
+            switchOffLasers();
+
+        } catch (Exception e) {
+            logErrorWithWindow("Issue in stopping sequence " + e);
         }
-        runnableLogger.info(String.format("cleanup took %d ms",
-                System.currentTimeMillis()-start));
+
+        runnableLogger.info(String.format(
+                "cleanup took %d ms",
+                System.currentTimeMillis() - start));
     }
-    
-    /** Reset stage positions and change them to the travel speed (fast)
-     * */
-    protected void setStagePositionsToStart(){
+
+    /**
+     * Reset stage positions and change them to the travel speed.
+     */
+    protected void setStagePositionsToStart() {
         long start = System.currentTimeMillis();
+
         try {
             long xySpeedTic = tic();
             TangoXYStage.setTangoAxisSpeed(
-                    XYStage, deviceSettings.getXyStageTravelSpeed());
+                    XYStage,
+                    deviceSettings.getXyStageTravelSpeed());
             logTiming("setStagePositionsToStart", "setTangoAxisSpeed", xySpeedTic);
 
             long mirrorVelTic = tic();
@@ -368,8 +446,10 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             logTiming("setStagePositionsToStart", "setMirrorVelocity", mirrorVelTic);
 
             long xyResetTic = tic();
-            // Restore XY explicitly so scan centres do not drift/cumulate between colours.
-            TangoXYStage.setXyPosition(XYStage, startingXPositionUm, startingYPositionUm);
+            TangoXYStage.setXyPosition(
+                    XYStage,
+                    startingXPositionUm,
+                    startingYPositionUm);
             logTiming("setStagePositionsToStart", "resetXY", xyResetTic);
 
             if (!ZStage.equals("")) {
@@ -381,25 +461,24 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             long mirrorResetTic = tic();
             core_.setPosition(mirrorStage, startingMirrorPositionUm);
             logTiming("setStagePositionsToStart", "resetMirror", mirrorResetTic);
-        } catch (Exception e){
+
+        } catch (Exception e) {
             logErrorWithWindow("Failed to reset stage positions: " + e.getMessage());
         }
+
         runnableLogger.info(String.format(
                 "Time taken moving stages to start: %d ms",
-                (System.currentTimeMillis() - start)));
+                System.currentTimeMillis() - start));
     }
-    
+
     /**
      * Configure the Hamamatsu for one of the three supported acquisition modes.
      *
-     *   Mode 0: External global reset
-     *   Mode 1: External synchronous readout
-     *   Mode 2: Start trigger + internal master clock burst
-     *       - Tango still uses an ordinary trigger range that begins at the
-     *         scan start, but with an intentionally huge trigger distance so
-     *         only the first trigger at scan onset ever occurs
+     * Mode 0: External global reset
+     * Mode 1: External synchronous readout
+     * Mode 2: Start trigger + internal master clock burst
      */
-    protected void setupCameraTriggering() throws Exception{
+    protected void setupCameraTriggering() throws Exception {
         long start = System.currentTimeMillis();
 
         core_.setProperty(camName, "ScanMode", "3");
@@ -425,13 +504,11 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                 core_.setProperty(camName, "TRIGGER SOURCE", "EXTERNAL");
                 core_.setProperty(camName, "TRIGGER ACTIVE", "SYNCREADOUT");
                 core_.setProperty(camName, "TRIGGER GLOBAL EXPOSURE", "DELAYED");
-                // Between scans leave the output LOW; the runnable raises HIGH only
-                // for the actual scan window.
                 core_.setProperty(camName, "OUTPUT TRIGGER KIND[1]", "LOW");
                 break;
 
             case DeviceSettingsManager.TRIGGER_START_INTERNAL_CLOCK:
-                runnableLogger.info("Configuring camera for start-triggered internal-clock burst acquisition (single start pulse from ordinary trigger range)");
+                runnableLogger.info("Configuring camera for start-triggered internal-clock burst acquisition");
                 core_.setProperty(camName, "TRIGGER SOURCE", "MASTER PULSE");
                 core_.setProperty(camName, "TRIGGER ACTIVE", "EDGE");
                 core_.setProperty(camName, "TRIGGER GLOBAL EXPOSURE", "DELAYED");
@@ -446,7 +523,7 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
 
         runnableLogger.info(String.format(
                 "Time taken setting camera trigger settings: %d ms",
-                (System.currentTimeMillis() - start)));
+                System.currentTimeMillis() - start));
     }
 
     protected void logCameraTriggerConfig(String label) {
@@ -462,82 +539,85 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
                     core_.getProperty(camName, "MASTER PULSE MODE"),
                     core_.getProperty(camName, "MASTER PULSE TRIGGER SOURCE"),
                     core_.getProperty(camName, "OUTPUT TRIGGER KIND[1]")));
+
         } catch (Exception e) {
             runnableLogger.warning("Could not log camera trigger config: " + e.getMessage());
         }
     }
 
-
-    /** Always return the camera to a safe live-imaging state at the end of an acquisition. */
-    protected void stopCameraTriggering() throws Exception{
+    /**
+     * Always return the camera to a safe live-imaging state at the end of an acquisition.
+     */
+    protected void stopCameraTriggering() throws Exception {
         core_.setProperty(camName, "TRIGGER SOURCE", "INTERNAL");
         core_.setProperty(camName, "TRIGGER ACTIVE", "EDGE");
         core_.setProperty(camName, "TRIGGER GLOBAL EXPOSURE", "DELAYED");
         core_.setProperty(camName, "MASTER PULSE MODE", "CONTINUOUS");
-        // core_.setProperty(camName, "OUTPUT TRIGGER KIND[1]", "EXPOSURE"); // this with blanking unecessary light dose
-		core_.setProperty(camName, "OUTPUT TRIGGER KIND[1]", "LOW");
+        core_.setProperty(camName, "OUTPUT TRIGGER KIND[1]", "LOW");
     }
-    
-    protected Datastore createDatastore(PropertyMap customPropertyMap) 
+
+    protected Datastore createDatastore(PropertyMap customPropertyMap)
             throws IOException, Exception {
-        return createDatastore(mm_.data().summaryMetadataBuilder().build(), 
+        return createDatastore(
+                mm_.data().summaryMetadataBuilder().build(),
                 customPropertyMap);
     }
-    
-    /**
-     * Empty property map, but supply summary metadata *
-     * @param metadata summary metadata to put in datastore
-     * @return empty datastore with summary metadata
-     * @throws IOException
-     * @throws Exception 
-     */
-    protected Datastore createDatastore(SummaryMetadata metadata) 
+
+    protected Datastore createDatastore(SummaryMetadata metadata)
             throws IOException, Exception {
         return createDatastore(metadata, PropertyMaps.builder().build());
     }
-    
-    /** Create datastore for acquisition using the supplied data save path,
-     * filename will be MMStack.
-     */
-    protected Datastore createDatastore(SummaryMetadata metadata, 
-            PropertyMap customPropertyMap) throws IOException, Exception{
+
+    protected Datastore createDatastore(
+            SummaryMetadata metadata,
+            PropertyMap customPropertyMap)
+            throws IOException, Exception {
+
         double storeStartTime = System.currentTimeMillis();
         Datastore store;
         String stackDirName;
         boolean separateMetadata = true;
-        
-        if (currentAcq!=null){
-            stackDirName = String.format("dOPM_t%04d_p%04d_z%04d_c%04d_view%d", 
+
+        if (currentAcq != null) {
+            stackDirName = String.format(
+                    "dOPM_t%04d_p%04d_z%04d_c%04d_view%d",
                     currentAcq.getCurrentAcqTimeIdx(),
                     currentAcq.getCurrentAcqPositionIdx(),
                     currentAcq.getCurrentAcqZIdx(),
                     currentAcq.getCurrentAcqChannelIdx(),
-                    currentAcq.getCurrentView()
-                );    
-        } else{
-            int i=0;
-            while(new File(dataOutDir, String.format("MMStack_n%04d", i)).exists()){ i++; }
-            stackDirName = (String.format("MMStack_n%04d", i));
+                    currentAcq.getCurrentView());
+        } else {
+            int i = 0;
+            while (new File(dataOutDir, String.format("MMStack_n%04d", i)).exists()) {
+                i++;
+            }
+            stackDirName = String.format("MMStack_n%04d", i);
         }
-        
-        String dataSavePath = (new File(dataOutDir, stackDirName)).getAbsolutePath();
-        
+
+        String dataSavePath = new File(dataOutDir, stackDirName).getAbsolutePath();
+
         try {
             runnableLogger.info("creating datastore in " + dataSavePath);
-            // EXCLUSIVELY NDTIFF (last parameter true) for background saving
-            store = FileMM.createDatastore(camName, dataSavePath, true, separateMetadata, true);
-        } catch (Exception e){
+            store = FileMM.createDatastore(
+                    camName,
+                    dataSavePath,
+                    true,
+                    separateMetadata,
+                    true);
+
+        } catch (Exception e) {
             throw new Exception("Failed to create datastore with " + e.getMessage());
         }
-        
-        PropertyMap myPropertyMap; 
+
+        PropertyMap myPropertyMap;
+
         try {
             runnableLogger.info("Getting more metadata");
             runnableLogger.info("angle " + currentViewAngle);
             runnableLogger.info("filter " + deviceSettings.getCurrentFilter());
             runnableLogger.info("laser " + deviceSettings.getCurrentLaser());
             runnableLogger.info("power " + deviceSettings.getCurrentLaserPower());
-            runnableLogger.info("exposureMs " + core_.getExposure()); 
+            runnableLogger.info("exposureMs " + core_.getExposure());
             runnableLogger.info("positionLabel " + currentAcq.getCurrentAcqPositionLabel());
             runnableLogger.info("positionIdx " + currentAcq.getCurrentAcqPositionIdx());
             runnableLogger.info("channelGroup " + currentAcq.getCurrentAcqChannel().channelGroup());
@@ -545,113 +625,163 @@ public abstract class AbstractAcquisitionRunnable implements Runnable {
             runnableLogger.info("zSlice " + currentAcq.getCurrentAcqZ());
             runnableLogger.info("zSliceIdx " + currentAcq.getCurrentAcqZIdx());
             runnableLogger.info("time ms " + currentAcq.getCurrentAcqTime());
-            runnableLogger.info("time mins " + currentAcq.getCurrentAcqTime()/60000);
+            runnableLogger.info("time mins " + currentAcq.getCurrentAcqTime() / 60000);
             runnableLogger.info("timeIdx" + currentAcq.getCurrentAcqTimeIdx());
 
-            myPropertyMap = PropertyMaps.builder().
-                putDouble("angle", currentViewAngle).
-                putString("filter", deviceSettings.getCurrentFilter()).
-                putString("laser", deviceSettings.getCurrentLaser()).
-                putDouble("power", deviceSettings.getCurrentLaserPower()).
-                putDouble("exposureMs", core_.getExposure()).
-                putDouble("x", startingXPositionUm).
-                putDouble("y", startingYPositionUm).
-                putDouble("z", startingZpositionUm).
-                putString("positionLabel", currentAcq.getCurrentAcqPositionLabel()).
-                putInteger("positionIdx", currentAcq.getCurrentAcqPositionIdx()).
-                putString("channelGroup", currentAcq.getCurrentAcqChannel().channelGroup()).
-                putInteger("channelIdx", currentAcq.getCurrentAcqChannelIdx()).
-                putDouble("zSlice", currentAcq.getCurrentAcqZ()).
-                putInteger("zSliceIdx", currentAcq.getCurrentAcqZIdx()).
-                putDouble("time (ms)", currentAcq.getCurrentAcqTime()).
-                putDouble("time (mins)", currentAcq.getCurrentAcqTime()/60000).
-                putInteger("timeIdx", currentAcq.getCurrentAcqTimeIdx()).
-                putAll(customPropertyMap).
-                    build();
-        } catch (Exception e){
+            myPropertyMap = PropertyMaps.builder()
+                    .putDouble("angle", currentViewAngle)
+                    .putString("filter", deviceSettings.getCurrentFilter())
+                    .putString("laser", deviceSettings.getCurrentLaser())
+                    .putDouble("power", deviceSettings.getCurrentLaserPower())
+                    .putDouble("exposureMs", core_.getExposure())
+                    .putDouble("x", startingXPositionUm)
+                    .putDouble("y", startingYPositionUm)
+                    .putDouble("z", startingZpositionUm)
+                    .putString("positionLabel", currentAcq.getCurrentAcqPositionLabel())
+                    .putInteger("positionIdx", currentAcq.getCurrentAcqPositionIdx())
+                    .putString("channelGroup", currentAcq.getCurrentAcqChannel().channelGroup())
+                    .putInteger("channelIdx", currentAcq.getCurrentAcqChannelIdx())
+                    .putDouble("zSlice", currentAcq.getCurrentAcqZ())
+                    .putInteger("zSliceIdx", currentAcq.getCurrentAcqZIdx())
+                    .putDouble("time (ms)", currentAcq.getCurrentAcqTime())
+                    .putDouble("time (mins)", currentAcq.getCurrentAcqTime() / 60000)
+                    .putInteger("timeIdx", currentAcq.getCurrentAcqTimeIdx())
+                    .putAll(customPropertyMap)
+                    .build();
+
+        } catch (Exception e) {
             myPropertyMap = PropertyMaps.builder().build();
-        } 
+        }
 
         metadata = metadata.copyBuilder().userData(myPropertyMap).build();
         store.setSummaryMetadata(metadata);
-        
-        runnableLogger.info(String.format("Datastore creation time: %.2f ms", 
-                (double)(System.currentTimeMillis() - storeStartTime)));
+
+        runnableLogger.info(String.format(
+                "Datastore creation time: %.2f ms",
+                (double) (System.currentTimeMillis() - storeStartTime)));
+
         return store;
     }
-    
+
     protected Datastore acquireTriggeredDataset(
-            Datastore store, int nFramesTotal) 
+            Datastore store,
+            int nFramesTotal)
             throws Exception {
         return acquireTriggeredDataset(store, nFramesTotal, 10000);
     }
-    
+
     protected Datastore acquireTriggeredDataset(
-            Datastore store, int nFramesTotal, int timeOutMs)
+            Datastore store,
+            int nFramesTotal,
+            int timeOutMs)
             throws Exception {
+
         boolean timeout = false;
         double acqTimeStart = System.currentTimeMillis();
         Coords.Builder cb = mm_.data().coordsBuilder().p(0);
 
-        boolean grabbed = false;
+        boolean grabbed;
         int nFrames = 0;
         double frameTimeTotal = 0;
         double firstFrameLatencyMs = -1;
         int nextProgressFrame = Math.max(1, nFramesTotal / 4);
-        
-        double magnification =  6.5 / (1.333 * (50 / (180 / 50)));
-        double pxSizeUm = 6.5/magnification;
+
+        double magnification = 6.5 / (1.333 * (50 / (180 / 50)));
+        double pxSizeUm = 6.5 / magnification;
         runnableLogger.info("Pixel size (um) is " + pxSizeUm);
+
         Metadata.Builder md = mm_.data().metadataBuilder().pixelSizeUm(pxSizeUm);
 
-        while (nFrames < nFramesTotal && !timeout){
-                double tic=System.currentTimeMillis();
-                double toc=tic;
+        while (nFrames < nFramesTotal && !timeout) {
+            double tic = System.currentTimeMillis();
+            double toc = tic;
 
-                grabbed = false;
-                while(toc-tic < timeOutMs && !grabbed){
-                    if (core_.getRemainingImageCount() > 0){
-                        // LITERAL REPO TaggedImage LOOP RESTORED
-                        TaggedImage img = core_.popNextTaggedImage();	
-                        Image tmp = mm_.data().convertTaggedImage(img);  
-                        Image cbImg = tmp.copyWith(cb.p(nFrames).build(), md.build());
-                        store.putImage(cbImg);
-                        grabbed = true;
-                        nFrames++;
-                        if (firstFrameLatencyMs < 0) {
-                            firstFrameLatencyMs = System.currentTimeMillis() - acqTimeStart;
-                            runnableLogger.info(String.format(
-                                    "TIMING | acquireTriggeredDataset | firstFrameLatency | %.1f ms",
-                                    firstFrameLatencyMs));
-                        }
-                        if (nFrames >= nextProgressFrame && nFrames < nFramesTotal) {
-                            runnableLogger.info(String.format(
-                                    "ACQ PROGRESS | %d / %d frames | elapsed %.1f ms",
-                                    nFrames, nFramesTotal,
-                                    (double)(System.currentTimeMillis() - acqTimeStart)));
-                            nextProgressFrame += Math.max(1, nFramesTotal / 4);
-                        }
+            grabbed = false;
+
+            while (toc - tic < timeOutMs && !grabbed) {
+                if (core_.getRemainingImageCount() > 0) {
+                    TaggedImage img = core_.popNextTaggedImage();
+                    Image tmp = mm_.data().convertTaggedImage(img);
+                    Image cbImg = tmp.copyWith(cb.p(nFrames).build(), md.build());
+
+                    store.putImage(cbImg);
+
+                    grabbed = true;
+                    nFrames++;
+
+                    if (firstFrameLatencyMs < 0) {
+                        firstFrameLatencyMs = System.currentTimeMillis() - acqTimeStart;
+                        runnableLogger.info(String.format(
+                                "TIMING | acquireTriggeredDataset | firstFrameLatency | %.1f ms",
+                                firstFrameLatencyMs));
                     }
-                    toc = System.currentTimeMillis(); 
-                }
-                if (toc-tic >= timeOutMs){
-                    int dropped = (nFramesTotal-nFrames);
-                    runnableLogger.severe(String.format("%d FRAMES DROPPED", dropped));
-                    timeout = true;  
-                    if (nFrames==0){
-                        throw new TimeoutException("No frames acquired in triggered acquisition.");
-                    } else if (dropped > maxDroppedFrames) {
-                        throw new TimeoutException(String.format("%d frames dropped", dropped));
+
+                    if (nFrames >= nextProgressFrame && nFrames < nFramesTotal) {
+                        runnableLogger.info(String.format(
+                                "ACQ PROGRESS | %d / %d frames | elapsed %.1f ms",
+                                nFrames,
+                                nFramesTotal,
+                                (double) (System.currentTimeMillis() - acqTimeStart)));
+                        nextProgressFrame += Math.max(1, nFramesTotal / 4);
                     }
                 }
-                frameTimeTotal += (toc-tic);
+
+                toc = System.currentTimeMillis();
+            }
+
+            if (toc - tic >= timeOutMs) {
+                int dropped = nFramesTotal - nFrames;
+
+                int remaining = -1;
+                boolean sequenceRunning = false;
+
+                try {
+                    remaining = core_.getRemainingImageCount();
+                } catch (Exception ignored) {
+                }
+
+                try {
+                    sequenceRunning = core_.isSequenceRunning(camName);
+                } catch (Exception ignored) {
+                }
+
+                runnableLogger.severe(String.format(
+                        "%d FRAMES DROPPED | acquired=%d | expected=%d | remainingInCore=%d | sequenceRunning=%s",
+                        dropped,
+                        nFrames,
+                        nFramesTotal,
+                        remaining,
+                        sequenceRunning));
+
+                timeout = true;
+
+                if (nFrames == 0) {
+                    throw new TimeoutException(
+                            "No frames acquired in triggered acquisition.");
+                } else if (dropped > maxDroppedFrames) {
+                    throw new TimeoutException(String.format(
+                            "%d frames dropped",
+                            dropped));
+                }
+            }
+
+            frameTimeTotal += (toc - tic);
         }
-        
-        runnableLogger.info(String.format("Frames acquired: %s (%d dropped)", 
-                nFrames, (nFramesTotal-nFrames)));
-        runnableLogger.info(String.format("Actual effective FPS: %.2f", 
-                1e3*nFrames/frameTimeTotal));
-        runnableLogger.info(String.format("Total time in acquireTriggeredDataset %.1f ms", (double)(System.currentTimeMillis() - acqTimeStart)));
+
+        runnableLogger.info(String.format(
+                "Frames acquired: %d (%d dropped)",
+                nFrames,
+                nFramesTotal - nFrames));
+
+        if (frameTimeTotal > 0) {
+            runnableLogger.info(String.format(
+                    "Actual effective FPS: %.2f",
+                    1e3 * nFrames / frameTimeTotal));
+        }
+
+        runnableLogger.info(String.format(
+                "Total time in acquireTriggeredDataset %.1f ms",
+                (double) (System.currentTimeMillis() - acqTimeStart)));
 
         return store;
     }
