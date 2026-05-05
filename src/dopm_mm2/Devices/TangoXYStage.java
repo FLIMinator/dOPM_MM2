@@ -588,43 +588,36 @@ public class TangoXYStage {
      * @return true if all values match
      * @throws IndexOutOfBoundsException if the token counts differ
      */
-    public static boolean checkSerialSet(String answer, String expectedValues) {
-        return checkSerialSet(answer.split(" "), expectedValues.split(" "));
-    }
+	public static boolean checkSerialSet(String answer, String expectedValues) {
+		return checkSerialSet(answer.trim().split("\\s+"),
+				expectedValues.trim().split("\\s+"));
+	}
 
-    /** Compare Tango serial response and expected values token by token.
-     *
-     * <p>Each token is first compared numerically when possible; otherwise it is
-     * compared as a case-insensitive string.
-     *
-     * @param answers answer tokens
-     * @param expectedValues expected tokens
-     * @return true if all values match
-     * @throws IndexOutOfBoundsException if the token counts differ
-     */
-    public static boolean checkSerialSet(String[] answers, String[] expectedValues)
-            throws IndexOutOfBoundsException {
+	public static boolean checkSerialSet(String[] answers, String[] expectedValues)
+			throws IndexOutOfBoundsException {
 
-        boolean allMatch = true;
+		boolean allMatch = true;
 
-        if (expectedValues.length != answers.length) {
-            throw new IndexOutOfBoundsException(String.format(
-                    "Serial answer has %d values but expected %d",
-                    answers.length, expectedValues.length));
-        }
+		if (expectedValues.length != answers.length) {
+			throw new IndexOutOfBoundsException(String.format(
+					"Serial answer has %d values but expected %d",
+					answers.length, expectedValues.length));
+		}
 
-        for (int n = 0; n < expectedValues.length; n++) {
-            boolean thisMatch;
-            try {
-                Double value = Double.valueOf(answers[n]);
-                Double evalueDouble = Double.valueOf(expectedValues[n]);
-                thisMatch = Math.abs(value - evalueDouble) < 1e-7;
-            } catch (NumberFormatException ne) {
-                thisMatch = answers[n].trim().equalsIgnoreCase(
-                        expectedValues[n].trim());
-            }
-            allMatch = allMatch && thisMatch;
-        }
-        return allMatch;
-    }
+		final double numericToleranceUm = 0.11; // 110 nm CHECK!!
+
+		for (int n = 0; n < expectedValues.length; n++) {
+			boolean thisMatch;
+			try {
+				double value = Double.parseDouble(answers[n].trim());
+				double expected = Double.parseDouble(expectedValues[n].trim());
+				thisMatch = Math.abs(value - expected) <= numericToleranceUm;
+			} catch (NumberFormatException ne) {
+				thisMatch = answers[n].trim().equalsIgnoreCase(
+						expectedValues[n].trim());
+			}
+			allMatch = allMatch && thisMatch;
+		}
+		return allMatch;
+	}
 }

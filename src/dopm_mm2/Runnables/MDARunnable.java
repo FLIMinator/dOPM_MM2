@@ -95,7 +95,7 @@ public class MDARunnable implements Runnable {
      * exception raised to avoid .lck files.
      * @param logOutDir 
      */
-    private void createLogFile(String logOutDir){
+/*     private void createLogFile(String logOutDir){
         try { 
             // Just print log for this runnable for debugging directly
             new File(logOutDir).mkdirs(); 
@@ -114,8 +114,38 @@ public class MDARunnable implements Runnable {
         } catch (SecurityException se){
             runnableLogger.severe("Failed to create dirs " + se.getMessage());
         }     
-    }
+    } */
     
+	private void createLogFile(String logOutDir){
+		try { 
+			new File(logOutDir).mkdirs(); 
+
+			FileHandler fh = new FileHandler(new File(
+					logOutDir, 
+					String.format("acqLog%s.txt", acqTimestamp)).toString());
+
+			fh.setFormatter(new SimpleFormatter());
+
+			// 🔑 Attach to shared parent logger
+			Logger rootLogger = Logger.getLogger("dopm_mm2");
+			rootLogger.addHandler(fh);
+
+			// Optional but recommended: avoid duplicate console logs
+			rootLogger.setUseParentHandlers(false);
+
+			rootLogger.info(String.format(
+					"Started log for %s at %s", 
+					this.getClass().getName(), logOutDir));
+
+		} catch (IOException ioe){
+			Logger.getLogger("dopm_mm2").severe(
+					"Failed to create log with " + ioe.getMessage());
+		} catch (SecurityException se){
+			Logger.getLogger("dopm_mm2").severe(
+					"Failed to create dirs " + se.getMessage());
+		}     
+	}
+	
     @Override
     public void run(){
         long mdaRunTic = System.currentTimeMillis();
